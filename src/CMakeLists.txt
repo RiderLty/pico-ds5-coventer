@@ -9,6 +9,7 @@ target_sources(${target_name} PRIVATE
  out_device.c
  input_queue.c
  ds5_pad.c
+ audio_stub.c
  hid_parser.c
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c

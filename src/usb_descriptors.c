@@ -37,64 +37,143 @@ uint8_t const *tud_descriptor_device_cb(void)
 }
 
 //--------------------------------------------------------------------
-// Configuration Descriptor（41 字节：config + HID 接口 + 2 端点）
+// Configuration Descriptor（227 字节，照搬 DS5Dongle 的 DS 模式配置：
+// 音频控制/扬声器流/麦克风流 接口 0-2 + HID 手柄接口 3。
+// 仅端点号沿用 DS5Dongle：音频 OUT EP1 / 音频 IN EP2 / HID IN 0x84 / HID OUT 0x03）
 //--------------------------------------------------------------------
 
-enum {
-    ITF_NUM_HID = 0,
-    ITF_NUM_TOTAL
-};
-
-#define CONFIG_TOTAL_LEN  41u
-#define HID_DESC_OFFSET   9u      // HID 类描述符在配置描述符中的偏移
+#define CONFIG_TOTAL_LEN  227u   // 0x00E3
 #define HID_REPORT_DESC_LEN 321u
 
 uint8_t const desc_configuration[] = {
-    // Config: 1 接口, 自供电, 500mA
+    // --- CONFIGURATION DESCRIPTOR ---
     0x09,        // bLength
     0x02,        // bDescriptorType (CONFIGURATION)
-    U16_TO_U8S_LE(CONFIG_TOTAL_LEN),
-    ITF_NUM_TOTAL, // bNumInterfaces
-    0x01,        // bConfigurationValue
-    0x00,        // iConfiguration
-    0xC0,        // bmAttributes: SELF-POWERED
-    0xFA,        // bMaxPower: 500mA
+    U16_TO_U8S_LE(CONFIG_TOTAL_LEN), // wTotalLength
+    0x04,        // bNumInterfaces
+    0x01,        // bConfigurationValue: 1
+    0x00,        // iConfiguration: 0
+    0xC0,        // bmAttributes: SELF-POWERED, NO REMOTE-WAKEUP
+    0xFA,        // bMaxPower: 500mA (250 * 2mA)
 
-    // Interface 0: HID（无 Boot 子类）
+    // --- INTERFACE DESCRIPTOR (0.0): Audio Control ---
     0x09,        // bLength
     0x04,        // bDescriptorType (INTERFACE)
-    0x00,        // bInterfaceNumber
-    0x00,        // bAlternateSetting
-    0x02,        // bNumEndpoints (IN + OUT)
+    0x00,        // bInterfaceNumber: 0
+    0x00,        // bAlternateSetting: 0
+    0x00,        // bNumEndpoints: 0
+    0x01,        // bInterfaceClass: Audio (0x01)
+    0x01,        // bInterfaceSubClass: Audio Control (0x01)
+    0x00,        // bInterfaceProtocol: 0x00
+    0x00,        // iInterface: 0
+
+    // Class-specific AC Interface Header Descriptor
+    0x0A, 0x24, 0x01,       // bLength, CS_INTERFACE, Header
+    0x00, 0x01,             // bcdADC: 1.00
+    0x49, 0x00,             // wTotalLength: 73 (0x0049)
+    0x02,                   // bInCollection: 2 streaming interfaces
+    0x01,                   // baInterfaceNr(1): Interface 1
+    0x02,                   // baInterfaceNr(2): Interface 2
+
+    // Input Terminal Descriptor (Terminal ID 1: USB Streaming → Speaker)
+    0x0C, 0x24, 0x02,       // bLength, CS_INTERFACE, Input Terminal
+    0x01,                   // bTerminalID: 1
+    0x01, 0x01,             // wTerminalType: USB Streaming (0x0101)
+    0x06,                   // bAssocTerminal: 6
+    0x04,                   // bNrChannels: 4
+    0x33, 0x00,             // wChannelConfig: L/R Front + L/R Surround
+    0x00,                   // iChannelNames: 0
+    0x00,                   // iTerminal: 0
+
+    // Feature Unit Descriptor (Unit ID 2 ← from Terminal 1, 扬声器音量/静音)
+    0x0C, 0x24, 0x06,       // bLength, CS_INTERFACE, Feature Unit
+    0x02,                   // bUnitID: 2
+    0x01,                   // bSourceID: 1
+    0x01,                   // bControlSize: 1 byte per control
+    0x03,                   // bmaControls[0]: Master – Mute, Volume
+    0x00, 0x00, 0x00, 0x00, 0x00, // bmaControls[1..4]: 无 per-channel 控制
+    // Output Terminal (Terminal ID 3: Speaker)
+    0x09, 0x24, 0x03,       // bLength, CS_INTERFACE, Output Terminal
+    0x03,                   // bTerminalID: 3
+    0x01, 0x03,             // wTerminalType: Speaker (0x0301)
+    0x04,                   // bAssocTerminal: 4
+    0x02,                   // bSourceID: 2
+    0x00,                   // iTerminal: 0
+
+    // Input Terminal (Terminal ID 4: Headset Mic)
+    0x0C, 0x24, 0x02,       // bLength, CS_INTERFACE, Input Terminal
+    0x04,                   // bTerminalID: 4
+    0x02, 0x04,             // wTerminalType: Headset (0x0402)
+    0x03,                   // bAssocTerminal: 3
+    0x02,                   // bNrChannels: 2 (mono mic duplicated)
+    0x03, 0x00,             // wChannelConfig: Front Left + Front Right
+    0x00, 0x00,             // iChannelNames, iTerminal
+
+    // Feature Unit (Unit ID 5 ← from Terminal 4, 麦克风音量/静音)
+    0x09, 0x24, 0x06,       // bLength, CS_INTERFACE, Feature Unit
+    0x05,                   // bUnitID: 5
+    0x04,                   // bSourceID: 4
+    0x01,                   // bControlSize: 1
+    0x03,                   // bmaControls[0]: Master – Mute, Volume
+    0x00,                   // bmaControls[1]: Ch1 – 无
+    0x00,                   // iFeature: 0
+    // Output Terminal (Terminal ID 6: USB Streaming)
+    0x09, 0x24, 0x03,       // bLength, CS_INTERFACE, Output Terminal
+    0x06,                   // bTerminalID: 6
+    0x01, 0x01,             // wTerminalType: USB Streaming
+    0x01,                   // bAssocTerminal: 1
+    0x05,                   // bSourceID: 5
+    0x00,                   // iTerminal: 0
+
+    // --- INTERFACE (1.0): Audio Streaming OUT (Alternate 0, 零带宽) ---
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
+    // --- INTERFACE (1.1): Audio Streaming OUT (Alternate 1, 有 EP) ---
+    0x09, 0x04, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
+    // AS General
+    0x07, 0x24, 0x01, 0x01, 0x01, 0x01, 0x00, // bTerminalLink=1, bDelay=1, PCM
+    // Format: 4ch, 2 bytes/sample, 16bit, 48000 Hz
+    0x0B, 0x24, 0x02, 0x01, 0x04, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
+    // EP OUT 0x01: Isochronous, Adaptive, 392 字节
+    0x09, 0x05, 0x01, 0x09, 0x88, 0x01, 0x01, 0x00, 0x00,
+    // CS Endpoint
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
+
+    // --- INTERFACE (2.0): Audio Streaming IN (Alternate 0, 零带宽) ---
+    0x09, 0x04, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
+    // --- INTERFACE (2.1): Audio Streaming IN (Alternate 1, 有 EP) ---
+    0x09, 0x04, 0x02, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
+    // AS General
+    0x07, 0x24, 0x01, 0x06, 0x01, 0x01, 0x00, // bTerminalLink=6, bDelay=1, PCM
+    // Format: 2ch, 2 bytes/sample, 16bit, 48000 Hz
+    0x0B, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
+    // EP IN 0x82: Isochronous, Asynchronous, 196 字节
+    0x09, 0x05, 0x82, 0x05, 0xC4, 0x00, 0x01, 0x00, 0x00,
+    // CS Endpoint
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
+
+    // --- INTERFACE DESCRIPTOR (3.0): HID (DualSense 5 Gamepad + Touchpad) ---
+    0x09,        // bLength
+    0x04,        // bDescriptorType (INTERFACE)
+    0x03,        // bInterfaceNumber: 3
+    0x00,        // bAlternateSetting: 0
+    0x02,        // bNumEndpoints: 2 (IN + OUT)
     0x03,        // bInterfaceClass: HID
     0x00,        // bInterfaceSubClass: None
     0x00,        // bInterfaceProtocol: None
-    0x00,        // iInterface
+    0x00,        // iInterface: 0
 
     // HID 类描述符
-    0x09,        // bLength
-    0x21,        // bDescriptorType (HID)
-    0x11, 0x01,  // bcdHID 1.11
-    0x00,        // bCountryCode
-    0x01,        // bNumDescriptors
-    0x22,        // bDescriptorType: Report
-    U16_TO_U8S_LE(HID_REPORT_DESC_LEN),
+    0x09, 0x21,             // bLength, bDescriptorType (HID)
+    0x11, 0x01,             // bcdHID: 1.11
+    0x00,                   // bCountryCode: Not localized
+    0x01,                   // bNumDescriptors: 1 report descriptor
+    0x22,                   // bDescriptorType: Report
+    U16_TO_U8S_LE(HID_REPORT_DESC_LEN), // wDescriptorLength: 321 (0x0141)
 
-    // EP IN 0x81: Interrupt, 64 字节, 1ms（1000Hz 轮询）
-    0x07,        // bLength
-    0x05,        // bDescriptorType (ENDPOINT)
-    0x81,        // bEndpointAddress
-    0x03,        // bmAttributes: Interrupt
-    0x40, 0x00,  // wMaxPacketSize: 64
-    0x01,        // bInterval
-
-    // EP OUT 0x02: Interrupt, 64 字节, 1ms（主机下发声光/震动设置）
-    0x07,        // bLength
-    0x05,        // bDescriptorType (ENDPOINT)
-    0x02,        // bEndpointAddress
-    0x03,        // bmAttributes: Interrupt
-    0x40, 0x00,  // wMaxPacketSize: 64
-    0x01,        // bInterval
+    // EP IN 0x84: Interrupt, 64 字节, 1ms（1000Hz 轮询）
+    0x07, 0x05, 0x84, 0x03, 0x40, 0x00, 0x01,
+    // EP OUT 0x03: Interrupt, 64 字节, 1ms（主机下发声光/震动设置）
+    0x07, 0x05, 0x03, 0x03, 0x40, 0x00, 0x01,
 };
 
 _Static_assert(sizeof(desc_configuration) == CONFIG_TOTAL_LEN,

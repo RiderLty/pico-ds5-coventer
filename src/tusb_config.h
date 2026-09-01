@@ -39,12 +39,29 @@
 #endif
 
 //------------- CLASS -------------//
-// 仅 HID：模拟 DualSense 手柄（无 CDC / 无音频）
+// HID（模拟 DS5 手柄）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
 #define CFG_TUD_CDC              0
 #define CFG_TUD_HID              1    // instance 0 = DS5 手柄
+#define CFG_TUD_AUDIO            1
+#define CFG_TUD_VENDOR           0
 
 // HID Endpoint transfer buffer size
 #define CFG_TUD_HID_EP_BUFSIZE   64
+
+//--------------------------------------------------------------------
+// AUDIO CLASS DRIVER CONFIGURATION（照搬 DS5Dongle：扬声器 4ch 16bit 48kHz
+// OUT / 麦克风 2ch 16bit 48kHz IN，本 SDK 的 EP 尺寸宏签名不同，直接硬编码）
+//--------------------------------------------------------------------
+
+// Full-Speed ISO EP：48kHz 满帧 48 样本 + 1 冗余样本
+// OUT(扬声器): (48+1)*2*4 = 392 字节；IN(麦克风): (48+1)*2*2 = 196 字节
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX   392
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX    196
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ (8u * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX)
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ  (16u * CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX)
+
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT          1
+#define CFG_TUD_AUDIO_ENABLE_EP_IN           1
 
 //--------------------------------------------------------------------
 // HOST CONFIGURATION

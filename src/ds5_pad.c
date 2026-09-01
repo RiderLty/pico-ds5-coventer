@@ -63,9 +63,9 @@ static const keymap_entry_t s_keymap[] = KEYMAP_TABLE;
 // ---- 输入状态 ----
 static uint8_t  s_kb[8];            // 最新键盘报文（mod + reserved + keys[6]）
 static uint8_t  s_ms_buttons;       // 最新鼠标按键位
-static float    s_acc_x, s_acc_y;   // 鼠标位移累积器（右摇杆偏移）
-static uint64_t s_last_ms_us;       // 最近一次鼠标事件时间
-static uint64_t s_last_decay_us;    // 最近一次右摇杆衰减时间
+static float    s_vel_x, s_vel_y;   // 鼠标速度 EMA（计数/ms）→ 右摇杆偏移
+static float    s_pending_x, s_pending_y; // 距上次 tick 的未处理位移
+static uint64_t s_last_tick_us;     // 上次 update_right_stick 的时间
 static uint8_t  s_seq;              // 输入报告序号
 
 // 触摸板镜像
@@ -93,6 +93,7 @@ static uint8_t s_report[DS_REPORT_LEN];
 void ds5_pad_init(void)
 {
     memcpy(s_report, s_report_template, sizeof(s_report));
+    s_last_tick_us = time_us_64();
 }
 
 // 键盘报文中某 keycode 是否按住
@@ -158,9 +159,9 @@ void ds5_pad_feed_ms(const uint8_t *data, uint8_t len)
     int16_t x = (int16_t)(data[2] | (data[3] << 8));
     int16_t y = (int16_t)(data[4] | (data[5] << 8));
 
-    s_acc_x += (float)x * MOUSE_SENS;
-    s_acc_y += (float)y * MOUSE_SENS;
-    s_last_ms_us = time_us_64();
+    // 位移累计到待处理量，速度在 tick 里按时间归一（计数/ms）
+    s_pending_x += (float)x;
+    s_pending_y += (float)y;
 
 #if TOUCHPAD_MIRROR
     if (x != 0 || y != 0) {
@@ -174,7 +175,7 @@ void ds5_pad_feed_ms(const uint8_t *data, uint8_t len)
         int ny = (int)s_touch_y + y;
         s_touch_x = (uint16_t)(nx < 0 ? 0 : (nx > (int)TOUCH_MAX_X ? (int)TOUCH_MAX_X : nx));
         s_touch_y = (uint16_t)(ny < 0 ? 0 : (ny > (int)TOUCH_MAX_Y ? (int)TOUCH_MAX_Y : ny));
-        s_last_move_us = s_last_ms_us;
+        s_last_move_us = time_us_64();
     }
 #endif
 }
@@ -259,30 +260,32 @@ static void update_mouse_buttons(void)
     btn_set(MAP_MOUSE_M_TO, m);
 }
 
-// 右摇杆：累积器 + 空闲回中
+// 右摇杆：摇杆偏移 = 鼠标当前速度（视角转动速率）。
+// 鼠标位移按 tick 间隔归一成速度，经 EMA 平滑后乘灵敏度；
+// 鼠标停止后速度在 ~3τ 内归零，摇杆回中、视角停止——与鼠标手感一致
 static void update_right_stick(void)
 {
     uint64_t now = time_us_64();
 
-    // 鼠标空闲超过延迟后，每 1ms 衰减一步（AIM_RETURN_RATE^steps）
-    if (now - s_last_ms_us > AIM_RETURN_DELAY_MS * 1000u) {
-        uint64_t since_decay_us = now - s_last_decay_us;
-        uint32_t steps = (uint32_t)(since_decay_us / 1000u);
-        if (steps > 50) steps = 50;
-        if (steps) {
-            float rate = powf(AIM_RETURN_RATE, (float)steps);
-            s_acc_x *= rate;
-            s_acc_y *= rate;
-            if (fabsf(s_acc_x) < 0.01f) s_acc_x = 0.0f;
-            if (fabsf(s_acc_y) < 0.01f) s_acc_y = 0.0f;
-            s_last_decay_us = s_last_decay_us + (uint64_t)steps * 1000u;
-        }
-    } else {
-        s_last_decay_us = now;
-    }
+    float dt = (float)(now - s_last_tick_us) / 1000.0f;
+    if (dt <= 0.0f) dt = 0.001f;
 
-    s_report[OFF_RX] = aim_axis(s_acc_x, 128.0f);
-    s_report[OFF_RY] = aim_axis(s_acc_y, 128.0f);
+    // 采样窗口内的平均速度（计数/ms）
+    float inst_x = s_pending_x / dt;
+    float inst_y = s_pending_y / dt;
+    s_pending_x = 0.0f;
+    s_pending_y = 0.0f;
+    s_last_tick_us = now;
+
+    // EMA 平滑：等效于取最近 AIM_EMA_TAU_MS 的平均速度
+    float w = 1.0f - expf(-dt / AIM_EMA_TAU_MS);
+    s_vel_x += (inst_x - s_vel_x) * w;
+    s_vel_y += (inst_y - s_vel_y) * w;
+    if (fabsf(s_vel_x) < 0.005f) s_vel_x = 0.0f;
+    if (fabsf(s_vel_y) < 0.005f) s_vel_y = 0.0f;
+
+    s_report[OFF_RX] = aim_axis(s_vel_x * MOUSE_SENS, 128.0f);
+    s_report[OFF_RY] = aim_axis(s_vel_y * MOUSE_SENS, 128.0f);
 }
 
 // 鼠标移动 → 触摸板 contact

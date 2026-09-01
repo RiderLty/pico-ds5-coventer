@@ -27,6 +27,7 @@ void core1_main(void) {
   // 通过 tuh_configure() 将 PIO 配置传递给 Host 栈
   // 注意: tuh_configure() 必须在 tuh_init() 之前调用
   pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+  pio_cfg.pin_dp = 12;   // 开发板 host 端口 D+ = GPIO12（DM = D+1 = GPIO13）
   tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
 
   // Report 协议而非 Boot 协议：配合描述符级鼠标解析，
@@ -34,7 +35,11 @@ void core1_main(void) {
   tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
 
   // 在 core1 上初始化 PIO-USB Host 栈 (roothub port1)
-  tuh_init(1);
+  tusb_rhport_init_t host_init = {
+    .role  = TUSB_ROLE_HOST,
+    .speed = TUSB_SPEED_FULL
+  };
+  tusb_init(1, &host_init);
 
   while (true) {
     tuh_task();
@@ -55,7 +60,11 @@ int main(void) {
 
   sleep_ms(100);
   // 在原生 USB 上初始化 Device 栈 (roothub port0)
-  tud_init(0);
+  tusb_rhport_init_t dev_init = {
+    .role  = TUSB_ROLE_DEVICE,
+    .speed = TUSB_SPEED_FULL
+  };
+  tusb_init(0, &dev_init);
   ds5_pad_init();
 
   uint8_t report[DS_REPORT_LEN];
