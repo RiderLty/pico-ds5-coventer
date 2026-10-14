@@ -1,6 +1,7 @@
 # USB 描述符热重载
 
-本功能通过 Lua `enable_km(kbd, mouse)` 运行期追加或移除键鼠 HID 接口。
+本功能通过 Lua `ability_enable(kbd, mouse, io)` 运行期追加或移除键鼠 HID 接口
+与 custom IO 通讯接口。
 DS5 + UAC1 基线不变，设备身份始终保持 Sony `054c:0ce6`。
 实现参考 `../pico-hid-mapper` 的配置描述符追加和断开/重连流程。
 
@@ -27,7 +28,7 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 两队列使用 striped 池，临界区内不嵌套其他锁，不额外消耗 TinyUSB 所需的独占锁池。
 不要恢复手工 SIO 指针、依赖 BSS 零初始化临界区，或为此禁用 RP2350 软件锁。
 
-另一个必要配置是 `CFG_TUD_HID=3`：新配置最多有 DS5、鼠标、键盘三个 HID 实例。
+另一个必要配置是 `CFG_TUD_HID=4`：新配置最多有 DS5、鼠标、键盘、IO 四个 HID 实例。
 只配置一个实例不能打开全部接口。无须为热重载修改 TinyUSB 源码。
 
 ## 切换流程与约束
@@ -52,26 +53,45 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 
 ## 配置组合
 
-| `enable_km(kbd, mouse)` | 配置长度 | 接口数 | HID 实例布局 |
+| `ability_enable(kbd, mouse, io)` | 配置长度 | 接口数 | HID 实例布局 |
 |---|---|---|---|
-| `false, false` | 227B | 4 | DS5=0 |
-| `false, true` | 252B | 5 | DS5=0，鼠标=1 |
-| `true, false` | 252B | 5 | DS5=0，键盘=1 |
-| `true, true` | 277B | 6 | DS5=0，鼠标=1，键盘=2 |
+| `false, false, false` | 227B | 4 | DS5=0 |
+| `false, true, false` | 252B | 5 | DS5=0，鼠标=1 |
+| `true, false, false` | 252B | 5 | DS5=0，键盘=1 |
+| `true, true, false` | 277B | 6 | DS5=0，鼠标=1，键盘=2 |
+| `false, false, true` | 259B | 5 | DS5=0，IO=1 |
+| `false, true, true` | 284B | 6 | DS5=0，鼠标=1，IO=2 |
+| `true, false, true` | 284B | 6 | DS5=0，键盘=1，IO=2 |
+| `true, true, true` | 309B | 7 | DS5=0，鼠标=1，键盘=2，IO=3 |
 
 音频占接口 0..2，DS5 固定为接口 3、IN `0x84` / OUT `0x03`。
-鼠标启用时为接口 4、IN `0x86`、MPS 8B；键盘为接口 4 或 5、IN `0x87`、MPS 16B。
+鼠标启用时为接口 4、IN `0x86`、MPS 8B；键盘为接口 4 或 5、IN `0x87`、MPS 16B；
+IO 接口紧随键盘、IN `0x88` / OUT `0x08`、MPS 64B、1ms 间隔。
 所有 HID IN 端点均为 1ms 间隔。接口号连续，端点互不冲突。
 
-报告描述符长度分别为 DS5 321B、鼠标 59B、键盘 89B。
+报告描述符长度分别为 DS5 321B、鼠标 59B、键盘 89B、IO 38B。
 鼠标报文 6B、无 Report ID；键盘实际发送 ID 2、1B 修饰键 + 14B 位图，
 总长度含 ID 为 16B。键盘描述符另有 ID 1 的 6KRO 与 LED output。
-两种接口协议均为 None，不是 Boot 键鼠接口。
+键鼠接口协议均为 None，不是 Boot 键鼠接口。
+
+### IO 通讯接口（custom HID）
+
+单接口双中断端点（IN `0x88` / OUT `0x08`）、vendor usage page `0xFF00`、
+**无 IAD**。Report ID 1 = 设备→主机（63B payload），Report ID 2 = 主机→设备
+（63B payload）；echo 回包 = `"pico"` 前缀 + 原 payload 前 59B，共 63B。
+数据通路全在 core0（OUT 端点数据经 `tud_hid_set_report_cb` → `usb_io_task`
+echo），无跨核队列。主机侧用 `tools/webhid-test.html`（Chrome/Edge，WebHID）
+做文本收发测试：连接过滤器 `{vendorId: 0x054c, usagePage: 0xFF00}`。
+
+**无 IAD 是有意的**：Windows usbccgp 只要配置描述符里出现任何 IAD 就只用
+IAD 分组、放弃 legacy 音频分组，未覆盖的多接口功能会被拆散 —— 带 IAD 的
+CDC/NCM 类与 DS5 音频基线在 Windows 上互斥（见 `exp/cdc-serial` 分支的
+探索记录）。HID 单接口不需要 IAD，音频不受影响。
 
 ## 主线默认行为
 
-- 上电仅返回 flash 基线，键鼠开关均为 false。
-- 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `enable_km(true, true)`。
+- 上电仅返回 flash 基线，键鼠与 IO 开关均为 false。
+- 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `ability_enable(true, true, true)`。
   计时从 Lua tick 启动开始，不从主机首次挂载开始；主机晚连接时可能直接看到键鼠配置。
 - `USB_KM_BOOT`、`USB_KM_HOT_TEST` 和首次挂载后 15 秒等待仅用于故障隔离，已删除。
 - TinyUSB 默认 debug=0；保留 UART 生命周期与简短 KM 状态日志。
@@ -83,8 +103,8 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 正常请求启用后应看到以下关键日志（启动时也有 `queues initialized`）：
 
 ```text
-[DS5C][KM] reload: old(kbd=0 mouse=0) -> new(kbd=1 mouse=1), ...
-[DS5C][KM] config desc: 277 B, 6 itf, mouse=1 kbd=1
+[DS5C][KM] reload: old(kbd=0 mouse=0 io=0) -> new(kbd=1 mouse=1 io=1), ...
+[DS5C][KM] config desc: 309 B, 7 itf, mouse=1 kbd=1 io=1
 [DS5C][KM] reconnect requested; waiting for host enumeration
 [DS5C][USB] MOUNTED: ... hid(kbd=1 mouse=1)
 ```

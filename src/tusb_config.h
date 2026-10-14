@@ -47,12 +47,13 @@
 #endif
 
 //------------- CLASS -------------//
-// HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标接口，
-// 见 usb_km.c 的 enable_km 路径）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
+// HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标 / custom IO
+// 通讯接口，见 usb_km.c 的 ability_enable 路径）+ UAC1 音频（扬声器/麦克风
+// 端点，数据全部丢弃）
 #define CFG_TUD_CDC              0
-// 热重载后的配置最多包含 3 个 HID 接口：DS5、鼠标、键盘。TinyUSB 会按
+// 热重载后的配置最多包含 4 个 HID 接口：DS5、鼠标、键盘、IO。TinyUSB 会按
 // 这个值分配每个接口的端点/控制传输状态；只配 1 无法打开全部 HID 接口。
-#define CFG_TUD_HID              3
+#define CFG_TUD_HID              4
 #define CFG_TUD_AUDIO            1
 #define CFG_TUD_VENDOR           0
 

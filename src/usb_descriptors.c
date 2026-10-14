@@ -10,6 +10,7 @@
 #include "usb_km.h"       // usb_km_apply（动态组装配置描述符）
 #include "kbd_hid.h"      // KBD_HID_REPORT_DESC_LEN（NKRO 键盘接口，可选追加）
 #include "mouse_hid.h"    // MOUSE_HID_DESC_LEN（16bit 鼠标接口，可选追加）
+#include "usb_io.h"       // IO 实例查询/接收（custom IO 通讯接口，可选追加）
 #include "debug.h"
 #include <string.h>
 
@@ -197,11 +198,16 @@ enum {
     STRID_PRODUCT,
     STRID_MOUSE,     // 3: 16bit 鼠标接口（仅启用时的配置描述符引用）
     STRID_KBD,       // 4: NKRO 键盘接口（同上）
+    STRID_IO,        // 5: custom IO 通讯接口（同上）
 };
 
 // 追加块 = TUD_HID_DESCRIPTOR 展开：接口 9 + HID 9 + 端点 7 = 25 字节
 #define KM_ITF_DESC_LEN   25u
-#define KM_DESC_MAX       (CONFIG_TOTAL_LEN + 2u * KM_ITF_DESC_LEN)
+// IO 追加块 = TUD_HID_INOUT_DESCRIPTOR 展开：接口 9 + HID 9 + EP OUT 7 +
+// EP IN 7 = 32 字节（单接口双中断端点，无 IAD —— usbccgp 保持 legacy 分组，
+// 音频不受影响；CDC/NCM 等带 IAD 的类与 DS5 音频基线在 Windows 上互斥）
+#define IO_ITF_DESC_LEN   32u
+#define KM_DESC_MAX       (CONFIG_TOTAL_LEN + 2u * KM_ITF_DESC_LEN + IO_ITF_DESC_LEN)
 
 // 键盘/鼠标端点（与 DS5 的 0x84 IN/0x03 OUT、音频的 0x82 IN/0x01 OUT 无冲突）
 #define EPNUM_MOUSE_IN    0x86
@@ -209,9 +215,18 @@ enum {
 #define EPNUM_KBD_IN      0x87
 #define EPNUM_KBD_SIZE    16u   // NKRO：1B Report ID + 1B 修饰键 + 14B 位图
 
+// IO 端点：notif 风格的成对中断端点，IN/OUT 方向独立
+#define EPNUM_IO_IN       0x88
+#define EPNUM_IO_OUT      0x08
+#define EPNUM_IO_SIZE     64u   // 报文 = 1B Report ID + 63B payload
+#define EPNUM_IO_INTERVAL 1u
+// IO 报告描述符长度（数组定义见下方 HID Report Descriptor 一节）
+#define IO_HID_REPORT_DESC_LEN 38u
+
 // 接口描述符里 bInterfaceNumber 的位置（追加块内偏移 2）
 #define KM_ITF_BNUM_OFFSET      2u
 _Static_assert(KM_ITF_DESC_LEN == 25u, "TUD_HID_DESCRIPTOR 展开长度变化，偏移需重算");
+_Static_assert(IO_ITF_DESC_LEN == 32u, "TUD_HID_INOUT_DESCRIPTOR 展开长度变化，偏移需重算");
 
 // 鼠标接口块：HID 类、协议 None（**不能用 boot 协议**——boot 鼠标只有 3 字节
 // 报文格式，与本项目的 6 字节 16bit 轴不符）
@@ -225,14 +240,22 @@ static uint8_t const desc_itf_kbd[] = {
                        EPNUM_KBD_IN, EPNUM_KBD_SIZE, 1),
 };
 
+// Custom IO 通讯接口块：vendor usage page，协议 None（非 boot 集合，WebHID
+// 可直接打开）。Report ID 1 = 设备→主机 IN，ID 2 = 主机→设备 OUT。
+static uint8_t const desc_itf_io[] = {
+    TUD_HID_INOUT_DESCRIPTOR(6, STRID_IO, HID_ITF_PROTOCOL_NONE, IO_HID_REPORT_DESC_LEN,
+                             EPNUM_IO_OUT, EPNUM_IO_IN, EPNUM_IO_SIZE, EPNUM_IO_INTERVAL),
+};
+
 _Static_assert(sizeof(desc_itf_mouse) == KM_ITF_DESC_LEN &&
-               sizeof(desc_itf_kbd) == KM_ITF_DESC_LEN,
-               "追加接口块长度与 KM_ITF_DESC_LEN 不一致");
+               sizeof(desc_itf_kbd) == KM_ITF_DESC_LEN &&
+               sizeof(desc_itf_io) == IO_ITF_DESC_LEN,
+               "追加接口块长度与 *_ITF_DESC_LEN 不一致");
 
 static uint8_t  s_cfg_desc_ram[KM_DESC_MAX] __attribute__((aligned(4)));
 static uint16_t s_cfg_desc_len = 0;   // 0 = 尚未组装（回调返回 flash 基线）
 
-void usb_km_apply(bool mouse, bool kbd)
+void usb_km_apply(bool mouse, bool kbd, bool io)
 {
     memcpy(s_cfg_desc_ram, desc_configuration, sizeof(desc_configuration));
     uint16_t len = (uint16_t)sizeof(desc_configuration);
@@ -256,6 +279,14 @@ void usb_km_apply(bool mouse, bool kbd)
         itf_count++;
     }
 
+    if (io) {
+        memcpy(s_cfg_desc_ram + len, desc_itf_io, sizeof(desc_itf_io));
+        // IO 追加在最后，占位接口号（6）按实际追加位置回填
+        s_cfg_desc_ram[len + KM_ITF_BNUM_OFFSET] = itf_count;
+        len = (uint16_t)(len + sizeof(desc_itf_io));
+        itf_count++;
+    }
+
     // 回填 wTotalLength(offset 2, LE) 与 bNumInterfaces(offset 4)
     s_cfg_desc_ram[2] = (uint8_t)(len & 0xFF);
     s_cfg_desc_ram[3] = (uint8_t)(len >> 8);
@@ -263,15 +294,15 @@ void usb_km_apply(bool mouse, bool kbd)
 
     s_cfg_desc_len = len;
 
-    // 自检：两项都不追加时，RAM 副本必须与 flash 基线逐字节一致，
+    // 自检：三项都不追加时，RAM 副本必须与 flash 基线逐字节一致，
     // 否则说明基线构造/回填有偏差，会静默改变主机看到的接口布局
-    if (!mouse && !kbd &&
+    if (!mouse && !kbd && !io &&
         memcmp(s_cfg_desc_ram, desc_configuration, sizeof(desc_configuration)) != 0) {
         debug_printf("[DS5C][KM] BUG: config desc RAM copy != baseline\n");
     }
 
-    debug_printf("[DS5C][KM] config desc: %u B, %u itf, mouse=%d kbd=%d\n",
-                 (unsigned)len, (unsigned)itf_count, mouse, kbd);
+    debug_printf("[DS5C][KM] config desc: %u B, %u itf, mouse=%d kbd=%d io=%d\n",
+                 (unsigned)len, (unsigned)itf_count, mouse, kbd, io);
 }
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
@@ -448,15 +479,47 @@ uint8_t const desc_hid_report_ds[] = {
 _Static_assert(sizeof(desc_hid_report_ds) == HID_REPORT_DESC_LEN,
                "HID report descriptor length mismatch");
 
+//--------------------------------------------------------------------
+// IO 通讯接口 Report Descriptor（vendor usage page，38 字节）
+// 单 Application collection：Report ID 1 = 设备→主机 63B input，
+// Report ID 2 = 主机→设备 63B output。非 boot 集合，WebHID 可直接打开。
+//--------------------------------------------------------------------
+uint8_t const desc_hid_report_io[] = {
+    0x06, 0x00, 0xFF,       // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,             // Usage 0x01
+    0xA1, 0x01,             // Collection (Application)
+    0x85, 0x01,             //   Report ID (1)
+    0x09, 0x01,             //   Usage 0x01
+    0x95, 0x3F,             //   Report Count (63)
+    0x75, 0x08,             //   Report Size (8)
+    0x15, 0x00,             //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,       //   Logical Maximum (255)
+    0x81, 0x02,             //   Input (Data, Var, Abs)
+    0x85, 0x02,             //   Report ID (2)
+    0x09, 0x02,             //   Usage 0x02
+    0x95, 0x3F,             //   Report Count (63)
+    0x75, 0x08,             //   Report Size (8)
+    0x15, 0x00,             //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,       //   Logical Maximum (255)
+    0x91, 0x02,             //   Output (Data, Var, Abs)
+    0xC0,                   // End Collection
+};
+
+_Static_assert(sizeof(desc_hid_report_io) == IO_HID_REPORT_DESC_LEN,
+               "IO 报告描述符长度与 IO_HID_REPORT_DESC_LEN 不一致");
+
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf)
 {
     // 按 TinyUSB HID 实例号分发（实例按配置描述符里接口出现顺序分配：
-    // DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无，见 usb_km.c 的 set_instance）
+    // DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无，IO 紧随键盘，见 usb_km.c）
     if (usb_km_mouse_enabled() && itf == MOUSE_HID_INSTANCE) {
         return mouse_hid_report_desc();
     }
     if (kbd_hid_enabled() && itf == kbd_hid_instance()) {
         return kbd_hid_report_desc();
+    }
+    if (usb_io_enabled() && itf == usb_io_instance()) {
+        return desc_hid_report_io;
     }
     return desc_hid_report_ds;
 }
@@ -542,6 +605,15 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type,
                                uint8_t *buffer, uint16_t reqlen)
 {
+    // IO 实例：GET_REPORT 返回零数据兜底（WebHID 走中断端点，控制路径少用）
+    if (usb_io_enabled() && itf == usb_io_instance()) {
+        if (report_type == HID_REPORT_TYPE_INPUT && reqlen >= 1u) {
+            memset(buffer, 0, reqlen);
+            return reqlen;
+        }
+        return 0;
+    }
+
     // 仅 DS5 实例（instance 0）处理；键盘/鼠标实例的 GET_REPORT 无需应答
     if (itf != 0) return 0;
 
@@ -570,6 +642,20 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            hid_report_type_t report_type,
                            uint8_t const *buffer, uint16_t bufsize)
 {
+    // IO 实例：OUT 端点数据由驱动原样转发 —— buffer[0] 是 Report ID，
+    // payload 从 buffer+1 开始（共 63B）；控制 SET_REPORT 路径的 ID 在
+    // report_id 参数里、buffer 已剥离。取 payload 交给 usb_io echo。
+    if (usb_io_enabled() && itf == usb_io_instance()) {
+        if (report_type == HID_REPORT_TYPE_OUTPUT) {
+            if (report_id == 0 && bufsize >= 1u) {
+                usb_io_receive(buffer + 1, (uint16_t)(bufsize - 1u));
+            } else if (report_id == IO_REPORT_ID_OUT && bufsize >= 1u) {
+                usb_io_receive(buffer, bufsize);
+            }
+        }
+        return;
+    }
+
     // NKRO 键盘实例：主机写回 LED 状态（Report ID 1 的 output 报告，
     // bit0-4 = Num/Caps/Scroll/Compose/Kana）
     if (kbd_hid_enabled() && itf == kbd_hid_instance()) {

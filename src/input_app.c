@@ -354,9 +354,9 @@ static int _lcb_hidkit_info(lua_State *L) {
  * Lua：键鼠输出接口（dkb_* = direct keyboard，dmo_* = direct mouse output；
  * 绑定名与 pico-hid-mapper 一致，脚本可直接照搬其文档）
  *
- *   enable_km(kbd, mouse)          开关 NKRO 键盘 / 16bit 鼠标输出接口
- *                                  （默认全关；生效需 USB 重枚举，约 0.5s，
- *                                  期间 DS5 从主机短暂消失）
+ *   ability_enable(kbd, mouse, io) 开关 NKRO 键盘 / 16bit 鼠标 / custom IO
+ *                                  通讯接口（默认全关；生效需 USB 重枚举，
+ *                                  约 0.5s，期间 DS5 从主机短暂消失）
  *   dkb_key(keycode, down)         宿主键盘按键（HID Usage ID 0x04..0x73 /
  *                                  修饰键 0xE0..0xE7，NKRO 位图全键无冲）
  *   dkb_release_all()              抬起全部键（防粘键安全阀）
@@ -374,12 +374,18 @@ static int _lcb_hidkit_info(lua_State *L) {
 // dmo 侧按键状态（core1 驻留；随每次 push 带出，与位移帧不互斥）
 static uint8_t s_ms_out_buttons;
 
-static int _lcb_enable_km(lua_State *L) {
-    bool kbd = lua_toboolean(L, 1) != 0;
+static int _lcb_ability_enable(lua_State *L) {
+    bool kbd   = lua_toboolean(L, 1) != 0;
     bool mouse = lua_toboolean(L, 2) != 0;
+    bool io    = lua_toboolean(L, 3) != 0;
     if (!mouse) s_ms_out_buttons = 0;   // 关闭侧清状态，防重枚举后粘键
-    usb_km_request(kbd, mouse);
+    usb_km_request(kbd, mouse, io);
     return 0;
+}
+
+static int _lcb_dhid_is_on(lua_State *L) {
+    lua_pushboolean(L, usb_km_io_enabled());
+    return 1;
 }
 
 // dmo 队列统一入口：带当前按键位出队（位移与按键状态解耦但同帧携带）
@@ -486,8 +492,8 @@ static int _lcb_dmo_is_down(lua_State *L) {
 void lua_binder_rebind(void) {
     lua_binder_bind("print", _lcb_print);
     lua_binder_bind("warn",  _lcb_warn);
-    // 键鼠输出接口（enable_km + dkb_*/dmo_*）
-    lua_binder_bind("enable_km",       _lcb_enable_km);
+    // 输出接口（ability_enable + dkb_*/dmo_*/dhid_*）
+    lua_binder_bind("ability_enable",  _lcb_ability_enable);
     lua_binder_bind("dkb_key",         _lcb_dkb_key);
     lua_binder_bind("dkb_release_all", _lcb_dkb_release_all);
     lua_binder_bind("dkb_led",         _lcb_dkb_led);
@@ -500,6 +506,7 @@ void lua_binder_rebind(void) {
     lua_binder_bind("dmo_state",       _lcb_dmo_state);
     lua_binder_bind("dmo_is_down",     _lcb_dmo_is_down);
     lua_binder_bind("dmo_is_on",       _lcb_dmo_is_on);
+    lua_binder_bind("dhid_is_on",      _lcb_dhid_is_on);
 
 
 

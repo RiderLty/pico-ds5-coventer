@@ -28,9 +28,9 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
   XInput 支持 Xbox 360/One/Series 有线输入，Switch Pro 经 USB 握手与 SPI 校准读取。
 - 键鼠输入经 Lua 转发到宿主键鼠接口。C 侧固定 FPS 键鼠→手柄映射已移除，
   Lua 回调是事件通知，返回值不拦截或改变 C 手柄直通路径。
-- 上电时键鼠输出接口均关闭，配置为 DS5 + UAC1 音频（227 字节、4 个接口）。
-  默认 `scripts/default.lua` 累计 tick 时间约 5 秒后调用 `enable_km(true, true)`，
-  经 USB 重枚举追加鼠标和键盘（277 字节、6 个接口）。断开等待为 500ms，
+- 上电时输出接口均关闭，配置为 DS5 + UAC1 音频（227 字节、4 个接口）。
+  默认 `scripts/default.lua` 累计 tick 时间约 5 秒后调用 `ability_enable(true, true, true)`，
+  经 USB 重枚举追加鼠标、键盘和 custom IO 通讯接口（309 字节、7 个接口）。断开等待为 500ms，
   主机重新枚举还需要额外时间，期间 DS5 上报暂停。
 - 若主机连接晚于脚本的 5 秒延时，首次看到的配置可能已经包含键鼠。
   当前主线没有“开机预装键鼠”或“首次挂载后等待 15 秒”的验证开关。
@@ -46,7 +46,7 @@ Misc → 触摸板按键，十字键直通。
 
 ## 键鼠热重载
 
-Lua `enable_km(kbd, mouse)` 异步提交请求，core0 在设备断开窗口内组装配置描述符、
+Lua `ability_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开窗口内组装配置描述符、
 更新 HID 实例和队列状态，再连接等待主机枚举。相同状态的请求不会再次断开。
 
 | 接口 | USB 接口号 | TinyUSB HID 实例 | 端点 |
@@ -55,10 +55,16 @@ Lua `enable_km(kbd, mouse)` 异步提交请求，core0 在设备断开窗口内�
 | DS5 | 3 | 0 | IN `0x84` / OUT `0x03` |
 | 16bit 鼠标（可选） | 4 | 1 | IN `0x86`，最大包 8B |
 | NKRO 键盘（可选） | 有鼠标时 5，否则 4 | 有鼠标时 2，否则 1 | IN `0x87`，最大包 16B |
+| custom IO 通讯（可选） | 键盘后一个 | 紧随键盘 | IN `0x88` / OUT `0x08`，最大包 64B |
 
 鼠标为无 Report ID 的 6B 相对报告；键盘描述符含 ID 1 的 6KRO 报告和 ID 2 的
 112 键位图报告，实际发送 NKRO。两者接口协议均为 None，不提供 USB HID Boot 协议。
-`CFG_TUD_HID=3` 预留 DS5、鼠标、键盘的全部实例。
+custom IO 通讯接口为 vendor usage page `0xFF00` 单接口（Report ID 1 = 设备→主机、
+ID 2 = 主机→设备，各 63B），echo 回包带 `pico` 前缀；文本收发测试页见
+`tools/webhid-test.html`。所有追加接口均为单接口 HID、**无 IAD**——带 IAD 的
+USB 类（CDC/NCM 等）会令 Windows usbccgp 放弃 legacy 音频分组、拆散 DS5 音频
+接口（详见 docs/usb-hot-reload.md 与 exp/cdc-serial 分支的探索记录）。
+`CFG_TUD_HID=4` 预留 DS5、鼠标、键盘、IO 通讯的全部实例。
 
 RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 启动前完成。
 根因、切换顺序、日志和硬件验证记录见 [USB 描述符热重载说明](docs/usb-hot-reload.md)。
@@ -84,7 +90,7 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 
 | 输出函数 | 用途 |
 |---|---|
-| `enable_km(kbd, mouse)` | 开关接口；参数顺序是键盘、鼠标 |
+| `ability_enable(kbd, mouse, io)` | 开关接口；参数顺序是键盘、鼠标、IO 通讯 |
 | `dkb_key(keycode, down)` | 键盘 Usage `0x04..0x73`，修饰键 `0xe0..0xe7` |
 | `dkb_release_all()` / `dkb_is_down(keycode)` | 抬起全部键 / 查询按键 |
 | `dkb_is_on()` / `dkb_led()` / `dkb_state()` | 生效开关 / LED 位 / 状态（4 个 u32） |

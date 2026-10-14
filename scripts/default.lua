@@ -8,7 +8,8 @@
 --     滚轮      → dmo_move(0,0,wheel)
 --   手柄输入仍走 C 直通 → DS5 输出（pad.* 接口落地后移交 Lua）。
 --
--- 时序：上电 5s 后 enable_km(true, true) 开启宿主键鼠接口（重枚举 ~0.5s）；
+-- 时序：上电 5s 后 ability_enable(true, true, true) 开启宿主键鼠接口与
+--       custom IO 通讯接口（重枚举 ~0.5s）；
 --       重枚举前 dkb_*/dmo_* 为 no-op（接口未启用），期间键鼠输入被吞。
 --
 -- 事件回调 / 监听声明 / hidkit 表的完整 API 见工程 README。
@@ -61,7 +62,7 @@ function on_dropped(slot, vid, pid)
     print("dropped", slot, string.format("%04x:%04x", vid, pid))
 end
 
--- ── tick：上电 5s 后开启宿主键鼠接口 ─────────────────────────────────
+-- ── tick：上电 5s 后开启宿主键鼠接口与 IO 通讯接口 ───────────────────
 local boot_us = 0
 local km_started = false
 local KM_DELAY_US = 5 * 1000 * 1000
@@ -71,8 +72,8 @@ function tick(dt_us)
     boot_us = boot_us + dt_us
     if boot_us >= KM_DELAY_US then
         km_started = true
-        print("enabling keyboard+mouse output...")
-        enable_km(true, true)
-        print("enable_km requested (re-enumerating, ~0.5s)")
+        print("enabling keyboard+mouse+io output...")
+        ability_enable(true, true, true)
+        print("ability_enable requested (re-enumerating, ~0.5s)")
     end
 end
