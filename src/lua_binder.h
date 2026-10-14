@@ -11,15 +11,15 @@ extern "C" {
 
 /*
  * lua_binder — lua_core 的唯一调用者，对外隐藏 Lua 实现细节
- * （由 pico-hid-mapper 的 src/lua_binder.c 按本工程 hidkit 回调精简移植）。
+ * （由 pico-hid-mapper 的 src/lua_binder.c 按本工程架构精简移植）。
+ *
+ * 架构：输入与输出完全解耦，中间只有 Lua —— 本模块只做**单向事件通知**
+ * （C → Lua 回调，无返回值、无拦截语义；mapper 版的"返回 true 拦截 C 默认
+ * 处理"语义已删除，本工程 C 侧没有默认映射）。输出由脚本直接调用 C 注册
+ * 的 dkb_* 、dmo_* 、pad.* 输出函数。
  *
  * 事件过滤：Lua 脚本通过 enable_listen_* 声明关注的事件，C 侧 bitmap/标志
  * O(1) 过滤，不关心的事件零开销跳过 Lua VM。
- *
- * 拦截语义（与 mapper 一致）：on_key / on_mouse_btn / on_gamepad_btn /
- * on_mouse_move / on_mouse_wheel / on_gamepad_abs 返回 true = 拦截，
- * C 侧默认处理（打包进跨核队列）被跳过；on_motion / on_touchpad /
- * on_dropped 无拦截语义。暂无 init()/tick() 回调（后期需要再加）。
  */
 
 // 热重载回调：lua_binder_init 在创建新 VM 后、加载脚本前调用。
@@ -35,26 +35,25 @@ bool lua_binder_is_ready(void);
 // 注册 C 函数到 Lua 全局表（func: lua_CFunction）
 bool lua_binder_bind(const char *name, void *func);
 
-//--- C → Lua 事件转发 ------------------------------------------------
+//--- C → Lua 事件转发（单向通知，无返回值）----------------------------
 
-// 键盘按键（keycode = HID Usage ID）。返回 true = Lua 拦截
-bool lua_binder_on_key(uint8_t keycode, bool down);
+// 键盘按键（keycode = HID Usage ID）
+void lua_binder_on_key(uint8_t keycode, bool down);
 
-// 鼠标按键（button = 0..7）。返回 true = Lua 拦截
-bool lua_binder_on_mouse_btn(uint8_t button, bool down);
+// 鼠标按键（button = 0..7）
+void lua_binder_on_mouse_btn(uint8_t button, bool down);
 
-// 鼠标移动。Lua 返回 true 则把 *dx/*dy 清零（跳过 C 默认处理）并返回 true
-bool lua_binder_on_mouse_move(int32_t *dx, int32_t *dy);
+// 鼠标位移
+void lua_binder_on_mouse_move(int32_t dx, int32_t dy);
 
-// 鼠标滚轮。Lua 返回 true 则把 *wheel 清零（跳过 C 默认处理）并返回 true
-bool lua_binder_on_mouse_wheel(int32_t *wheel);
+// 鼠标滚轮
+void lua_binder_on_mouse_wheel(int32_t wheel);
 
-// 手柄按键（code = hidkit BTN_*）。返回 true = Lua 拦截
-bool lua_binder_on_gamepad_btn(uint8_t code, bool pressed);
+// 手柄按键（code = hidkit BTN_*）
+void lua_binder_on_gamepad_btn(uint8_t code, bool pressed);
 
-// 手柄绝对状态（每份解析成功的报文；轴 -32767..32767，扳机 0..32767）。
-// 返回 true = Lua 拦截（跳过 C 默认打包）
-bool lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
+// 手柄绝对状态（每份解析成功的报文；轴 -32767..32767，扳机 0..32767）
+void lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                                int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
 
 // 手柄六轴（陀螺 ±32767=±2000dps，加速度 ±32767=±4g）。无拦截语义

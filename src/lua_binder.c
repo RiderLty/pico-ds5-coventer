@@ -232,74 +232,55 @@ bool lua_binder_bind(const char *name, void *func) {
 // C → Lua: 事件转发（入口 bitmap/标志 O(1) 过滤）
 //--------------------------------------------------------------------+
 
-bool lua_binder_on_key(uint8_t keycode, bool down) {
-    if (!(g_key_listen[keycode >> 6] & (1ULL << (keycode & 0x3F)))) return false;
-    if (g_lid_on_key < 0) return false;
+void lua_binder_on_key(uint8_t keycode, bool down) {
+    if (!(g_key_listen[keycode >> 6] & (1ULL << (keycode & 0x3F)))) return;
+    if (g_lid_on_key < 0) return;
 
     lua_core_push_int(keycode);
     lua_core_push_bool(down);
-    if (!lua_core_pcall_id(g_lid_on_key, 2, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    return intercepted;
+    (void)lua_core_pcall_id(g_lid_on_key, 2, 0);
 }
 
-bool lua_binder_on_mouse_btn(uint8_t button, bool down) {
-    if (!(g_mouse_listen & (1U << (button & 7)))) return false;
-    if (g_lid_on_mouse_btn < 0) return false;
+void lua_binder_on_mouse_btn(uint8_t button, bool down) {
+    if (!(g_mouse_listen & (1U << (button & 7)))) return;
+    if (g_lid_on_mouse_btn < 0) return;
 
     lua_core_push_int(button);
     lua_core_push_bool(down);
-    if (!lua_core_pcall_id(g_lid_on_mouse_btn, 2, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    return intercepted;
+    (void)lua_core_pcall_id(g_lid_on_mouse_btn, 2, 0);
 }
 
-// 鼠标移动：dx/dy 以指针传入，脚本返回 true 则清零跳过后续处理
-bool lua_binder_on_mouse_move(int32_t *dx, int32_t *dy) {
-    if (!g_mouse_move_listen) return false;
-    if (g_lid_on_mouse_move < 0) return false;
+void lua_binder_on_mouse_move(int32_t dx, int32_t dy) {
+    if (!g_mouse_move_listen) return;
+    if (g_lid_on_mouse_move < 0) return;
 
-    lua_core_push_int(*dx);
-    lua_core_push_int(*dy);
-    if (!lua_core_pcall_id(g_lid_on_mouse_move, 2, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    if (intercepted) { *dx = 0; *dy = 0; }
-    return intercepted;
+    lua_core_push_int(dx);
+    lua_core_push_int(dy);
+    (void)lua_core_pcall_id(g_lid_on_mouse_move, 2, 0);
 }
 
-// 鼠标滚轮：wheel 以指针传入，脚本返回 true 则清零跳过后续处理
-bool lua_binder_on_mouse_wheel(int32_t *wheel) {
-    if (!g_mouse_wheel_listen) return false;
-    if (g_lid_on_mouse_wheel < 0) return false;
+void lua_binder_on_mouse_wheel(int32_t wheel) {
+    if (!g_mouse_wheel_listen) return;
+    if (g_lid_on_mouse_wheel < 0) return;
 
-    lua_core_push_int(*wheel);
-    if (!lua_core_pcall_id(g_lid_on_mouse_wheel, 1, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    if (intercepted) { *wheel = 0; }
-    return intercepted;
+    lua_core_push_int(wheel);
+    (void)lua_core_pcall_id(g_lid_on_mouse_wheel, 1, 0);
 }
 
-bool lua_binder_on_gamepad_btn(uint8_t code, bool pressed) {
-    if (!(g_gamepad_listen & (1U << (code & 0x1F)))) return false;
-    if (g_lid_on_gamepad_btn < 0) return false;
+void lua_binder_on_gamepad_btn(uint8_t code, bool pressed) {
+    if (!(g_gamepad_listen & (1U << (code & 0x1F)))) return;
+    if (g_lid_on_gamepad_btn < 0) return;
 
     lua_core_push_int((int)code);
     lua_core_push_bool(pressed);
-    if (!lua_core_pcall_id(g_lid_on_gamepad_btn, 2, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    return intercepted;
+    (void)lua_core_pcall_id(g_lid_on_gamepad_btn, 2, 0);
 }
 
-bool lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
+void lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                                int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt) {
     (void)slot;
-    if (!g_gamepad_abs_listen) return false;
-    if (g_lid_on_gamepad_abs < 0) return false;
+    if (!g_gamepad_abs_listen) return;
+    if (g_lid_on_gamepad_abs < 0) return;
 
     lua_core_push_int(ls_x);
     lua_core_push_int(ls_y);
@@ -307,10 +288,7 @@ bool lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
     lua_core_push_int(rs_y);
     lua_core_push_int(lt);
     lua_core_push_int(rt);
-    if (!lua_core_pcall_id(g_lid_on_gamepad_abs, 6, 1)) return false;
-    bool intercepted = false;
-    lua_core_pop_bool(&intercepted);
-    return intercepted;
+    (void)lua_core_pcall_id(g_lid_on_gamepad_abs, 6, 0);
 }
 
 void lua_binder_on_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,

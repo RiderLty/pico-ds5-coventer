@@ -82,11 +82,7 @@ void input_queue_flush(void)
         s_count--;
         critical_section_exit(&s_cs);
 
-        if (kind == INQ_KIND_KB) {
-            ds5_pad_feed_kb(data, len);
-        } else if (kind == INQ_KIND_MS) {
-            ds5_pad_feed_ms(data, len);
-        } else if (kind == INQ_KIND_PAD) {
+        if (kind == INQ_KIND_PAD) {
             ds5_pad_feed_pad(data, len);
         }
     }

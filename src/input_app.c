@@ -1,14 +1,11 @@
 /*
  * hidkit 输入接线层实现（参考 pico-hid-mapper 的 src/hidkit_app.c 精简）。
  *
- * 与 mapper 版的差异（本工程只保留"同样的输入能力"）：
- *   - 出口分两路：先转发 Lua（返回 true = 拦截，跳过 C 默认路径，映射逻辑
- *     交由脚本接管），未拦截才进 C 默认状态机并打包进跨核队列：
- *       键盘边沿   → 虚拟 8B 键盘报文（mod + keys[6]），INQ_KIND_KB
- *       鼠标按键   → 按键位字节，随下一帧 mouse_abs 带出，INQ_KIND_MS
- *       手柄按键   → BTN_* 位掩码，随 PAD 帧带出，INQ_KIND_PAD
- *       手柄轴     → i16 四轴 + u8 双扳机，INQ_KIND_PAD
- *   - 六轴/触摸板：C 侧无消费，仅转发 Lua（脚本未监听时零开销）
+ * 与 mapper 版的差异：**输入与输出完全解耦，中间只有 Lua** ——
+ *   - 键盘/鼠标事件**单向转发** Lua（无返回值；C 侧键鼠→手柄的固定映射
+ *     管线已整体移除，ds5_pad 不再吃键鼠）
+ *   - 手柄事件双向：转发 Lua + 维护 BTN 掩码随 PAD 帧入队（C 直通 DS5，
+ *     pad.* 接口落地后此直通移交 Lua）
  *   - Switch Pro 握手库移植层在此收口（时间/日志/校准交付）
  *   - usbh_app_driver_get_cb 全工程唯一定义（XInput 类驱动注册）
  *   - lua_binder_rebind 在此实现：print/warn 覆盖 + hidkit 信息表
@@ -54,14 +51,6 @@ typedef struct {
 } dev_reg_t;
 static dev_reg_t s_dev[CFG_TUH_HID];
 
-// 虚拟键盘报文状态（边沿事件累积；多键盘合并，与旧路径"最新报文生效"等价）
-static uint8_t s_kb_mod;
-static uint8_t s_kb_keys[6];
-
-// 鼠标按键位（bit0 左 / bit1 右 / bit2 中…，随下一帧 mouse_abs 带出）
-static uint8_t s_ms_buttons;
-static uint8_t s_ms_buttons_sent;   // 上一次已入队帧携带的按键位（全零移动帧去重用）
-
 // 手柄状态（多手柄合并到最后一份状态上；转换器场景可接受）
 static int16_t s_pad_lsx, s_pad_lsy, s_pad_rsx, s_pad_rsy;
 static uint8_t s_pad_lt, s_pad_rt;
@@ -70,29 +59,6 @@ static uint32_t s_pad_btnmask;
 /*--------------------------------------------------------------------+
  * 队列打包
  *--------------------------------------------------------------------*/
-
-// 虚拟键盘报文（mod + reserved + keys[6]）入队
-static void send_kb(void)
-{
-    uint8_t payload[8];
-    payload[0] = s_kb_mod;
-    payload[1] = 0;
-    memcpy(&payload[2], s_kb_keys, sizeof(s_kb_keys));
-    input_queue_send(INQ_KIND_KB, payload, sizeof(payload));
-}
-
-// 鼠标帧（buttons u8, wheel i8, x i16, y i16）入队
-static void send_ms(int32_t wheel, int32_t dx, int32_t dy)
-{
-    uint8_t payload[6];
-    payload[0] = s_ms_buttons;
-    payload[1] = (uint8_t)wheel;
-    payload[2] = (uint8_t)(dx & 0xFF);
-    payload[3] = (uint8_t)((dx >> 8) & 0xFF);
-    payload[4] = (uint8_t)(dy & 0xFF);
-    payload[5] = (uint8_t)((dy >> 8) & 0xFF);
-    input_queue_send(INQ_KIND_MS, payload, sizeof(payload));
-}
 
 // 手柄帧（见 input_queue.h 布局）入队
 static void send_pad(void)
@@ -129,60 +95,27 @@ static void send_pad_disconnect(void)
  *--------------------------------------------------------------------*/
 
 // 键盘 + 鼠标按键 + 手柄按键统一出口，code 段前缀区分类型（hidkit_codes.h）。
-// 各段先转发 Lua（返回 true = 拦截，跳过 C 默认路径），未拦截才进 C 状态机。
+// 键盘/鼠标段单向转发 Lua（键鼠→手柄的 C 固定管线已移除）；手柄段额外维护
+// BTN 位掩码（随 PAD 帧入队，C 直通 DS5，pad.* 落地后移交 Lua）。
 void __no_inline_not_in_flash_func(hidkit_input_key)(int8_t slot, uint16_t code, bool pressed)
 {
     (void)slot;
 
     switch (HIDKIT_CODE_SEG(code)) {
-    case HIDKIT_CODE_KEYBOARD: {
-        uint8_t usage = (uint8_t)(code & 0xFFu);
-        if (lua_binder_on_key(usage, pressed)) return;   // Lua 拦截
-
-        if (usage >= 0xE0u && usage <= 0xE7u) {
-            // 修饰键：HID 报文 byte0 的位序 = usage - 0xE0
-            uint8_t bit = (uint8_t)(1u << (usage - 0xE0u));
-            if (pressed) s_kb_mod |= bit;
-            else         s_kb_mod &= (uint8_t)~bit;
-        } else {
-            // 普通键：6 槽位表（满则丢弃，标准 6-key rollover 行为）
-            uint8_t i;
-            if (pressed) {
-                for (i = 0; i < sizeof(s_kb_keys); i++) {
-                    if (s_kb_keys[i] == usage) return;   // 重复事件
-                    if (s_kb_keys[i] == 0) { s_kb_keys[i] = usage; break; }
-                }
-                if (i == sizeof(s_kb_keys)) return;      // 槽位满
-            } else {
-                bool found = false;
-                for (i = 0; i < sizeof(s_kb_keys); i++) {
-                    if (s_kb_keys[i] == usage) { s_kb_keys[i] = 0; found = true; }
-                }
-                if (!found) return;
-            }
-        }
-        send_kb();
+    case HIDKIT_CODE_KEYBOARD:
+        lua_binder_on_key((uint8_t)(code & 0xFFu), pressed);
         break;
-    }
 
     case HIDKIT_CODE_MOUSE: {
         uint8_t num = (uint8_t)(code & 0xFFu);
-        if (num >= 8) return;
-        if (lua_binder_on_mouse_btn(num, pressed)) return;   // Lua 拦截
-
-        uint8_t bit = (uint8_t)(1u << num);
-        if (pressed) s_ms_buttons |= bit;
-        else         s_ms_buttons &= (uint8_t)~bit;
-        // 按键变化随下一帧 mouse_abs 带出；位移为零的按下/抬起也发一帧，
-        // 保证 core0 的扳机立即响应
-        send_ms(0, 0, 0);
+        if (num < 8) lua_binder_on_mouse_btn(num, pressed);
         break;
     }
 
     case HIDKIT_CODE_GAMEPAD: {
         uint8_t btn = (uint8_t)(code & 0xFFu);
         if (btn > 31u) return;
-        if (lua_binder_on_gamepad_btn(btn, pressed)) return;   // Lua 拦截
+        lua_binder_on_gamepad_btn(btn, pressed);
 
         if (pressed) s_pad_btnmask |= (1u << btn);
         else         s_pad_btnmask &= ~(1u << btn);
@@ -196,15 +129,12 @@ void __no_inline_not_in_flash_func(hidkit_input_key)(int8_t slot, uint16_t code,
     }
 }
 
-// 鼠标位移与滚轮（仅非零时被调用）。Lua 可分别拦截位移/滚轮（清零跳过）
+// 鼠标位移与滚轮（仅非零时被调用）：单向转发 Lua
 void __no_inline_not_in_flash_func(hidkit_input_mouse_abs)(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
 {
     (void)slot;
-    lua_binder_on_mouse_move(&dx, &dy);
-    lua_binder_on_mouse_wheel(&wheel);
-    if (dx == 0 && dy == 0 && wheel == 0 && s_ms_buttons == s_ms_buttons_sent) return;
-    s_ms_buttons_sent = s_ms_buttons;
-    send_ms(wheel, dx, dy);
+    lua_binder_on_mouse_move(dx, dy);
+    lua_binder_on_mouse_wheel(wheel);
 }
 
 // 手柄绝对状态：每份解析成功的报文都回调（125~1000Hz）
@@ -220,7 +150,7 @@ void __no_inline_not_in_flash_func(hidkit_input_gamepad_abs)(int8_t slot, int32_
     if (lt < 0) lt = 0; else if (lt > 32767) lt = 32767;
     if (rt < 0) rt = 0; else if (rt > 32767) rt = 32767;
 
-    if (lua_binder_on_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt)) return;   // Lua 拦截
+    lua_binder_on_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
 
     s_pad_lsx = (int16_t)ls_x;
     s_pad_lsy = (int16_t)ls_y;

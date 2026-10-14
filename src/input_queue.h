@@ -13,9 +13,9 @@
  * 所有 tud_* 调用只发生在 core0，从结构上消除双核直写 Device FIFO 的竞态。
  */
 
-// 记录 kind 标签（每条记录第 1 字节）
-#define INQ_KIND_KB   2u   // 其余字节 = 原始键盘报文（mod + reserved + keys[6]，8B）
-#define INQ_KIND_MS   3u   // 其余字节 = 归一化鼠标帧（buttons u8, wheel i8, x i16, y i16，6B）
+// 记录 kind 标签（每条记录第 1 字节）。
+// 手柄直通帧（PAD）是唯一记录类型 —— 键鼠→手柄的固定管线已移除
+// （键鼠输入经 Lua 转发到宿主键鼠接口，见 input_app.c）
 #define INQ_KIND_PAD  4u   // 其余字节 = 手柄帧（15B，布局见下）
 
 // 手柄帧布局（INQ_KIND_PAD 之后，小端）：
