@@ -31,6 +31,9 @@
 #define KM_L1_NOINIT 0
 #endif
 #define KM_L1_APPLY 0
+#ifndef KM_INIT_MASK
+#define KM_INIT_MASK 3
+#endif
 #endif
 
 // Lua 请求（core1 写，原子）
@@ -43,8 +46,14 @@ static bool s_kbd, s_mouse;
 void usb_km_init(void)
 {
     // 队列先就绪：core1（Lua）随时可能入队
+    // KM_INIT_MASK 二分：bit0 = kbd_out_init，bit1 = mouse_queue_init
+    // （0 = 空转，排查哪半边出的问题；CMake -DKM_INIT_MASK=<n> 切换）
+#if KM_INIT_MASK & 1u
     kbd_out_init(false);
+#endif
+#if KM_INIT_MASK & 2u
     mouse_queue_init();
+#endif
     s_kbd = s_mouse = false;
 #if KM_L1_APPLY   // L1b 起置 1：L1a 阶段不组装，配置描述符走 flash 原路径
     usb_km_apply(false, false);   // 组装基线描述符（全关 = DS5+音频，与历史一致）
