@@ -4,6 +4,11 @@ add_executable(${target_name})
 target_sources(${target_name} PRIVATE
  main.c
  usb_descriptors.c
+ usb_km.c
+ kbd_hid.c
+ kbd_out.c
+ mouse_hid.c
+ mouse_queue.c
  input_app.c
  debug.c
  input_queue.c
@@ -14,6 +19,20 @@ target_sources(${target_name} PRIVATE
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
  )
+
+# ── 预制 Lua 脚本自动嵌入（防脚本/固件不同步）────────────────────────────
+# configure 期比对时间戳：default.lua 更新则重新生成 lua_default_script.h
+set(LUA_SCRIPT_SRC "${CMAKE_CURRENT_LIST_DIR}/../scripts/default.lua")
+set(LUA_SCRIPT_HDR "${CMAKE_CURRENT_LIST_DIR}/lua_default_script.h")
+add_custom_command(
+  OUTPUT ${LUA_SCRIPT_HDR}
+  COMMAND python3 ${CMAKE_CURRENT_LIST_DIR}/../tools/embed_lua.py
+          ${LUA_SCRIPT_SRC} ${LUA_SCRIPT_HDR}
+  DEPENDS ${LUA_SCRIPT_SRC}
+  COMMENT "embed_lua: ${LUA_SCRIPT_SRC} -> lua_default_script.h"
+)
+add_custom_target(embed_lua_script DEPENDS ${LUA_SCRIPT_HDR})
+add_dependencies(${target_name} embed_lua_script)
 
 # print memory usage, enable all warnings
 target_link_options(${target_name} PRIVATE -Xlinker --print-memory-usage)

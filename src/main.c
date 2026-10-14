@@ -21,8 +21,9 @@
 #include "input_app.h"
 #include "ds5_pad.h"
 #include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
+#include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（L1：编入但默认全关）
 #include "lua_binder.h"
-#include "lua_default_script.h"   // 预制脚本（tools/embed_lua.py 生成，无动态加载）
+#include "lua_default_script.h"   // 预制脚本（CMake 自动 embed，无动态加载）
 
 // ARM 工具链 15.x 兼容: newlib 的 remove()/rename()（Lua os 库拉入）通过
 // _unlink_r/_link_r 调用 _unlink/_link, 但 Pico SDK 的 newlib_interface.c
@@ -121,6 +122,9 @@ int main(void) {
     .role  = TUSB_ROLE_DEVICE,
     .speed = TUSB_SPEED_FULL
   };
+  // 键鼠输出接口开关（L1：默认全关，无 Lua 绑定 —— 仅验证动态组装基线路径）
+  usb_km_init();
+
   tusb_init(0, &dev_init);
   ds5_pad_init();
 
@@ -131,6 +135,8 @@ int main(void) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
+    usb_km_task();     // enable_km 请求轮询（L1：无人请求，仅几次原子读）
+    usb_km_service();  // 键鼠输出队列出队（L1：未启用直接返回）
     lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（脚本未定义 tick 时为空操作）
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
