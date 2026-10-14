@@ -78,21 +78,4 @@ if(DEBUG_BAUDRATE)
   target_compile_definitions(${target_name} PRIVATE DEBUG_BAUDRATE=${DEBUG_BAUDRATE})
 endif()
 
-# 逐层排查开关（km-l1）——注意 -D 缓存跨 configure 持久化，切换后建议
-# cmake -B build -S . -UKM_L1_APPLY -UKM_L1_NOINIT 显式清理
-#   KM_L1_APPLY=1   → usb_km_init 调用 usb_km_apply + 主循环挂 task/service
-#   KM_L1_NOINIT=1  → main 不调用 usb_km_init（隔离临界区初始化）
-set(KM_L1_APPLY "" CACHE STRING "km layer bisect: 1=enable apply path")
-if(KM_L1_APPLY)
-  target_compile_definitions(${target_name} PRIVATE KM_L1_APPLY=1)
-endif()
-set(KM_L1_NOINIT "" CACHE STRING "km layer bisect: 1=skip usb_km_init")
-if(KM_L1_NOINIT)
-  target_compile_definitions(${target_name} PRIVATE KM_L1_NOINIT=1)
-endif()
-set(KM_INIT_MASK "" CACHE STRING "km layer bisect: usb_km_init mask bit0=kbd_out bit1=mouse_queue")
-if(NOT KM_INIT_MASK STREQUAL "")
-  target_compile_definitions(${target_name} PRIVATE KM_INIT_MASK=${KM_INIT_MASK})
-endif()
-
 pico_add_extra_outputs(${target_name})

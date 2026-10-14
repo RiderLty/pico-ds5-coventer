@@ -122,10 +122,6 @@ int main(void) {
     .role  = TUSB_ROLE_DEVICE,
     .speed = TUSB_SPEED_FULL
   };
-  // 键鼠输出接口开关（L1：默认全关，无 Lua 绑定 —— 仅验证动态组装基线路径）
-#if !KM_L1_NOINIT
-  usb_km_init();
-#endif
 
   tusb_init(0, &dev_init);
   ds5_pad_init();
@@ -137,11 +133,8 @@ int main(void) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
-#if KM_L1_APPLY
-    usb_km_task();     // enable_km 请求轮询（L1a：无人请求，仅几次原子读）
-    usb_km_service();  // 键鼠输出队列出队（L1a：未启用直接返回）
-#endif
-    lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（脚本未定义 tick 时为空操作）
+    usb_km_task();     // enable_km 请求轮询（无人请求时仅几次原子读；apply 在重枚举窗口内惰性执行）
+    usb_km_service();  // 键鼠输出队列出队（未启用直接返回）
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
     // 未就绪时由主机 NAK 主导节奏，与真实手柄/DS5Dongle 行为一致

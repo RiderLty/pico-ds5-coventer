@@ -11,6 +11,17 @@
 #define KBD_OUT_QUEUE_SIZE  16
 #define KBD_OUT_QUEUE_MASK  (KBD_OUT_QUEUE_SIZE - 1)
 
+// 固定自旋锁号（编译期静态初始化，零运行时分配/分支）：
+// 18 = SDK 保留给 OS 软件的区间（本工程无 OS）；claim 池 24-31 由
+// debug/input_queue 运行期认领，与这里永不相交。
+#define KBD_OUT_SPINLOCK_ID 18u
+#define KM_SPIN_LOCK_INSTANCE(id) \
+    ((spin_lock_t *)(SIO_BASE + SIO_SPINLOCK0_OFFSET + (id) * 4u))
+
+static critical_section_t cs = {
+    .spin_lock = KM_SPIN_LOCK_INSTANCE(KBD_OUT_SPINLOCK_ID),
+};
+
 static kbd_out_state_t queue[KBD_OUT_QUEUE_SIZE];
 static uint16_t head = 0;
 static uint16_t tail = 0;
@@ -20,20 +31,11 @@ static critical_section_t cs;
 // 当前累积状态（只在临界区内读写，故 core0/core1 都可安全调用下面的接口）
 static kbd_out_state_t s_state;
 
-static bool s_enabled = false;
+static bool s_enabled = false;   // BSS 静态初始化：队列/索引/状态全零，无需运行期 init
 
 //--------------------------------------------------------------------+
-// 生命周期
+// 开关（重枚举切换时由 usb_km_task 调用；清队列防粘键）
 //--------------------------------------------------------------------+
-void kbd_out_init(bool enabled)
-{
-  critical_section_init(&cs);
-  head = tail = count = 0;
-  memset(queue, 0, sizeof(queue));
-  memset(&s_state, 0, sizeof(s_state));
-  s_enabled = enabled;
-}
-
 void kbd_out_set_enabled(bool on)
 {
   critical_section_enter_blocking(&cs);

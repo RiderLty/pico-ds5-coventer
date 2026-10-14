@@ -40,8 +40,8 @@ _Static_assert(sizeof(kbd_out_state_t) == 1 + KBD_HID_NKRO_BYTES,
 // 开关来源：参数配置的 bitmap 位 PARAM_BIT_KBD_OUT（0=关，**默认**；需重启生效）。
 // main() 用 param_cfg_preload_bool() 读出后，经 kbd_out_init() 交给本模块。
 
-// 初始化队列与使能位（main() 在 core1 启动前调用一次）
-void kbd_out_init(bool enabled);
+// 初始化：**静态完成** —— 队列/索引/状态由 BSS 零初始化，临界区用固定自旋锁号
+// （18，编译期静态绑定，不参与运行期 claim 池）。无 init 函数。
 
 void kbd_out_set_enabled(bool on);
 bool kbd_out_enabled(void);

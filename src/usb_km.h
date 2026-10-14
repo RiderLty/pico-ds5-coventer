@@ -7,18 +7,20 @@
  * usb_km — NKRO 键盘 / 16bit 鼠标输出接口的运行期开关（参考 pico-hid-mapper
  * 的 usb_desc_config_apply + runtime reconfigure 路径）。
  *
- * 默认**全关**：配置描述符为基线（DS5 + 音频），与历史行为一致。
- * Lua enable_km(kbd, mouse) 请求变更（core1）→ usb_km_task()（core0 主循环）
- * 完成动态组装 + USB 重枚举（tud_disconnect → apply → tud_connect，
- * 重枚举期间设备从主机消失约 0.5s，DS5 上报同步暂停）。
+ * 默认**全关**：boot 时配置描述符回调返回 flash 基线（DS5 + 音频），与无
+ * km 模块时逐字节一致。Lua enable_km(kbd, mouse) 请求变更（core1）→
+ * usb_km_task()（core0 主循环）在重枚举窗口内惰性 apply + USB 重枚举
+ * （tud_disconnect → apply → tud_connect，期间设备从主机消失约 0.5s，
+ * DS5 上报同步暂停）。
+ *
+ * 全部状态 BSS 静态初始化（全关 = 全零），**无 init 函数、无运行时分配、
+ * 无运行期自旋锁认领**：两个队列临界区用固定自旋锁号 18/19（SDK 保留给
+ * OS 软件的区间，本工程无 OS；claim 池 24-31 由 debug/input_queue 运行期
+ * 认领，互不相交），编译期静态绑定。
  *
  * 接口在配置描述符里的追加顺序：DS5(0) → [鼠标 itf4/EP0x86] → [键盘 itf5/EP0x87]
  * → TinyUSB HID 实例号：DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无。
  */
-
-// 初始化：建队列/临界区，按当前请求（默认全关）组装一次描述符。
-// core0 调用，须在 tusb_init(0) 之前。
-void usb_km_init(void);
 
 // 请求变更开关（core1 / Lua enable_km 调用；异步生效，由 usb_km_task 完成）
 void usb_km_request(bool kbd, bool mouse);

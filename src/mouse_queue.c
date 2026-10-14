@@ -9,11 +9,19 @@
 #include "mouse_queue.h"
 #include "pico/sync.h"
 
-static mouse_report_t queue[MOUSE_QUEUE_SIZE];
+static mouse_report_t queue[MOUSE_QUEUE_SIZE];   // BSS 零初始化，无需运行期 init
 static uint16_t head = 0;    // 出队索引
 static uint16_t tail = 0;    // 入队索引
 static uint16_t count = 0;
-static critical_section_t cs;
+
+// 固定自旋锁号 19（编译期静态绑定，理由见 kbd_out.c）
+#define MOUSE_QUEUE_SPINLOCK_ID 19u
+#define KM_SPIN_LOCK_INSTANCE(id) \
+    ((spin_lock_t *)(SIO_BASE + SIO_SPINLOCK0_OFFSET + (id) * 4u))
+
+static critical_section_t cs = {
+    .spin_lock = KM_SPIN_LOCK_INSTANCE(MOUSE_QUEUE_SPINLOCK_ID),
+};
 
 // dx/dy 用 ±32767（与描述符逻辑范围一致）；wheel 用 ±127
 static inline int16_t clamp_i16(int32_t v)
@@ -28,14 +36,6 @@ static inline int8_t clamp_i8(int32_t v)
   if (v > 127) return 127;
   if (v < -127) return -127;
   return (int8_t)v;
-}
-
-void mouse_queue_init(void)
-{
-  critical_section_init(&cs);
-  head = 0;
-  tail = 0;
-  count = 0;
 }
 
 void mouse_queue_push(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons)

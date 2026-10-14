@@ -23,42 +23,19 @@
 #include "mouse_hid.h"
 #include "mouse_queue.h"
 
-// 逐层排查开关：1 = usb_km_init 调用 usb_km_apply（RAM 描述符路径）+ 主循环
-// 挂 task/service；0（默认，L1a）= 全部旁路，配置描述符走 flash 原路径。
-// CMake -DKM_L1_APPLY=1 切换；排查结束移除。
-#ifndef KM_L1_APPLY
-#ifndef KM_L1_NOINIT
-#define KM_L1_NOINIT 0
-#endif
-#define KM_L1_APPLY 0
-#ifndef KM_INIT_MASK
-#define KM_INIT_MASK 3
-#endif
-#endif
+// 全部状态 BSS 静态初始化（全关 = 全零）。usb_km_apply 在 usb_km_task 的
+// 状态切换（重枚举窗口）内惰性执行：boot 时未应用 → 配置描述符回调返回
+// flash 基线（与无 km 模块时逐字节一致）；enable_km 请求 → tud_disconnect →
+// apply → tud_connect。无 init 函数、无运行时分配、无运行期自旋锁认领。
 
 // Lua 请求（core1 写，原子）
 static volatile bool s_req_kbd;
 static volatile bool s_req_mouse;
 
-// 已生效状态（core0 私有；apply 与重枚举都在 core0）
+// 已生效状态（core0 私有；apply 与重枚举都在 core0）。
+// s_kbd/s_mouse 及全部队列/状态均为 BSS 静态初始化（全关 = 全零），
+// 无 init 函数、无运行时分配 —— usb_km_init 已删除。
 static bool s_kbd, s_mouse;
-
-void usb_km_init(void)
-{
-    // 队列先就绪：core1（Lua）随时可能入队
-    // KM_INIT_MASK 二分：bit0 = kbd_out_init，bit1 = mouse_queue_init
-    // （0 = 空转，排查哪半边出的问题；CMake -DKM_INIT_MASK=<n> 切换）
-#if KM_INIT_MASK & 1u
-    kbd_out_init(false);
-#endif
-#if KM_INIT_MASK & 2u
-    mouse_queue_init();
-#endif
-    s_kbd = s_mouse = false;
-#if KM_L1_APPLY   // L1b 起置 1：L1a 阶段不组装，配置描述符走 flash 原路径
-    usb_km_apply(false, false);   // 组装基线描述符（全关 = DS5+音频，与历史一致）
-#endif
-}
 
 void usb_km_request(bool kbd, bool mouse)
 {

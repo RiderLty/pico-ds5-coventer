@@ -16,8 +16,8 @@
 #define MOUSE_QUEUE_SIZE  32
 #define MOUSE_QUEUE_MASK  (MOUSE_QUEUE_SIZE - 1)
 
-// 初始化（main 中调用一次，core1 启动前）
-void mouse_queue_init(void);
+// 初始化：**静态完成** —— 队列/索引由 BSS 零初始化，临界区用固定自旋锁号
+// （19，编译期静态绑定，不参与运行期 claim 池）。无 init 函数。
 
 // 入队（引擎侧调用；队列满则与队尾合并，不丢位移）
 void mouse_queue_push(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons);
