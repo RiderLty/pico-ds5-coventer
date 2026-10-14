@@ -36,9 +36,21 @@ tusb_desc_device_t const desc_device = {
     .bNumConfigurations = 0x01
 };
 
+// RAM 副本：const 原件落 flash（XIP），直接写入会被硬件静默丢弃 —— 运行期
+// 改身份必须改 RAM（pico-hid-mapper 同款教训，见其 tud_descriptor_device_cb）
+static tusb_desc_device_t desc_device_ram;
+
 uint8_t const *tud_descriptor_device_cb(void)
 {
-    return (uint8_t const *)&desc_device;
+    desc_device_ram = desc_device;
+
+    // 键鼠输出接口启用 → 接口结构不再是纯 DS5：VID 换成 0x0450（PID/字符串
+    // 不动，pico-hid-mapper 的默认身份同款）。主机按 VID/PID 缓存驱动绑定，
+    // 同 VID/PID 而接口组合变化会导致 PC 端绑定失败（TinyUSB 官方注释明言）。
+    if (usb_km_kbd_enabled() || usb_km_mouse_enabled()) {
+        desc_device_ram.idVendor = 0x0450;
+    }
+    return (uint8_t const *)&desc_device_ram;
 }
 
 //--------------------------------------------------------------------

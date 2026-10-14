@@ -62,6 +62,7 @@ void usb_km_task(void)
 
     bool was_inited = tud_inited();
     if (was_inited) {
+        debug_printf("[DS5C][KM] disconnecting...\n");
         tud_disconnect();
         sleep_ms(500);   // 让主机完成"设备拔出"，重枚举期间 DS5 上报暂停
     }
@@ -77,6 +78,7 @@ void usb_km_task(void)
     s_mouse = mouse;
 
     if (was_inited) {
+        debug_printf("[DS5C][KM] connecting...\n");
         tud_connect();
         debug_printf("[DS5C][KM] re-enumerated: kbd=%d mouse=%d\n", kbd, mouse);
     }
