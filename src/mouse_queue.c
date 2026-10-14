@@ -14,14 +14,14 @@ static uint16_t head = 0;    // 出队索引
 static uint16_t tail = 0;    // 入队索引
 static uint16_t count = 0;
 
-// 固定自旋锁号 19（编译期静态绑定，理由见 kbd_out.c）
-#define MOUSE_QUEUE_SPINLOCK_ID 19u
-#define KM_SPIN_LOCK_INSTANCE(id) \
-    ((spin_lock_t *)(SIO_BASE + SIO_SPINLOCK0_OFFSET + (id) * 4u))
+static critical_section_t cs;
 
-static critical_section_t cs = {
-    .spin_lock = KM_SPIN_LOCK_INSTANCE(MOUSE_QUEUE_SPINLOCK_ID),
-};
+void mouse_queue_init(void)
+{
+  // 队列临界区不嵌套其他锁；通过 SDK 选择正确的软件/硬件锁地址。
+  critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
+  head = tail = count = 0;
+}
 
 // dx/dy 用 ±32767（与描述符逻辑范围一致）；wheel 用 ±127
 static inline int16_t clamp_i16(int32_t v)

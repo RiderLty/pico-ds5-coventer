@@ -11,6 +11,14 @@
 
 #define CFG_TUSB_OS               OPT_OS_PICO
 
+// TinyUSB 日志走项目 UART（src/debug.c 的 tu_printf），生产默认关闭。
+// -DTUSB_DEBUG_LEVEL=2 可查看枚举、控制传输和端点活动；会产生高频日志。
+#ifndef CFG_TUSB_DEBUG
+#define CFG_TUSB_DEBUG             0
+#endif
+#include "debug.h"
+#define CFG_TUSB_DEBUG_PRINTF      tu_printf
+
 // Enable device stack
 #define CFG_TUD_ENABLED     1
 
@@ -42,7 +50,9 @@
 // HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标接口，
 // 见 usb_km.c 的 enable_km 路径）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
 #define CFG_TUD_CDC              0
-#define CFG_TUD_HID              1
+// 热重载后的配置最多包含 3 个 HID 接口：DS5、鼠标、键盘。TinyUSB 会按
+// 这个值分配每个接口的端点/控制传输状态；只配 1 无法打开全部 HID 接口。
+#define CFG_TUD_HID              3
 #define CFG_TUD_AUDIO            1
 #define CFG_TUD_VENDOR           0
 

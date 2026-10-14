@@ -37,11 +37,9 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(kbd_out_state_t) == 1 + KBD_HID_NKRO_BYTES,
                "kbd_out_state_t 必须是 15 字节（修饰 1 + 位图 14），与 NKRO 报告一致");
 
-// 开关来源：参数配置的 bitmap 位 PARAM_BIT_KBD_OUT（0=关，**默认**；需重启生效）。
-// main() 用 param_cfg_preload_bool() 读出后，经 kbd_out_init() 交给本模块。
-
-// 初始化：**静态完成** —— 队列/索引/状态由 BSS 零初始化，临界区用固定自旋锁号
-// （18，编译期静态绑定，不参与运行期 claim 池）。无 init 函数。
+// 初始化必须在双核启动前完成。临界区通过 SDK 的 striped 锁池初始化，
+// 兼容 RP2350 的软件锁实现；临界区内不得嵌套其他锁。
+void kbd_out_init(void);
 
 void kbd_out_set_enabled(bool on);
 bool kbd_out_enabled(void);

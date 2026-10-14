@@ -41,6 +41,15 @@ target_compile_options(${target_name} PRIVATE -Wall -Wextra)
 # use tinyusb implementation
 target_compile_definitions(${target_name} PRIVATE PIO_USB_USE_TINYUSB)
 
+# Pico SDK 的 TinyUSB interface 默认会注入 CFG_TUSB_DEBUG=0；用编译选项先取消
+# 再重定义，避免同一命令行出现两个 -D 导致大量 redefined warning。输出函数由
+# tusb_config.h 绑定到 debug.c 的 tu_printf()，走现有 UART。
+set(TUSB_DEBUG_LEVEL 0 CACHE STRING "TinyUSB debug log level (0..3)")
+target_compile_options(${target_name} PRIVATE
+  -UCFG_TUSB_DEBUG
+  -DCFG_TUSB_DEBUG=${TUSB_DEBUG_LEVEL}
+)
+
 # ── hidkit 解析库（INTERFACE 库，源码编进本 target）────────────────────────
 # 容量：转换器场景单槽位足够；HIDKIT_HOT 把库内每报文热路径放进 RAM ——
 # 宿主侧 hidkit_input_* 出口已在 input_app.c 同样标注，整条输入链才真正不停摆

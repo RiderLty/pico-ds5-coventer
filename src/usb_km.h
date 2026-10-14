@@ -13,17 +13,18 @@
  * （tud_disconnect → apply → tud_connect，期间设备从主机消失约 0.5s，
  * DS5 上报同步暂停）。
  *
- * 全部状态 BSS 静态初始化（全关 = 全零），**无 init 函数、无运行时分配、
- * 无运行期自旋锁认领**：两个队列临界区用固定自旋锁号 18/19（SDK 保留给
- * OS 软件的区间，本工程无 OS；claim 池 24-31 由 debug/input_queue 运行期
- * 认领，互不相交），编译期静态绑定。
+ * 状态默认全关；usb_km_init 在双核启动前通过 SDK striped 锁池初始化
+ * 队列临界区，兼容 RP2350 软件锁，并保留独占锁池给 TinyUSB。
  *
- * 接口在配置描述符里的追加顺序：DS5(0) → [鼠标 itf4/EP0x86] → [键盘 itf5/EP0x87]
+ * 接口在配置描述符里的追加顺序：DS5(itf3) → [鼠标 itf4/EP0x86] → [键盘 itf4或5/EP0x87]
  * → TinyUSB HID 实例号：DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无。
  */
 
 // 请求变更开关（core1 / Lua enable_km 调用；异步生效，由 usb_km_task 完成）
 void usb_km_request(bool kbd, bool mouse);
+
+// 队列和状态初始化（必须在双核启动前调用）。
+void usb_km_init(void);
 
 // core0 主循环调用：有未应用的请求则重枚举切换（无请求时仅几次原子读）
 void usb_km_task(void);

@@ -2,7 +2,8 @@
  * 串口调试输出实现。
  *
  * printf 路径：debug_printf → 自旋锁 → vsnprintf → uart_write_blocking。
- * 只在冷路径调用（挂载/拔出/握手状态机/错误），调用频率低，
+ * 默认只在冷路径调用（挂载/拔出/握手状态机/错误）；TinyUSB debug 可增加高频日志。
+ * 正常日志调用频率低，
  * 阻塞式写出在这里可接受，不值得引入环形缓冲/IRQ 复杂度。
  */
 
@@ -16,7 +17,7 @@
 
 #include "debug.h"
 
-// 硬件自旋锁编号（SDK 保留 0..PICO_SPINLOCK_ID_OS1 等，用用户区间第一个）
+// 由 SDK 分配的独占锁，兼容软件/硬件自旋锁实现
 static spin_lock_t *s_lock;
 
 void debug_init(void)
@@ -70,4 +71,27 @@ void debug_printf(const char *fmt, ...)
     if (n > (int)sizeof(msg) - 1) n = (int)sizeof(msg) - 1;
 
     write_all(msg, (uint32_t)n);
+}
+
+int tu_printf(const char *fmt, ...)
+{
+    if (!s_lock || !fmt) return 0;
+
+    char msg[256];
+    int n;
+    va_list ap;
+    va_start(ap, fmt);
+    n = vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return n;
+    if (n >= (int)sizeof(msg)) n = (int)sizeof(msg) - 1;
+
+    // TinyUSB 自带日志已经包含 CRLF；只加前缀，不额外补换行，避免日志空行。
+    char line[272];
+    int prefix = snprintf(line, sizeof(line), "[TUSB] ");
+    if (prefix < 0) return 0;
+    if (prefix + n >= (int)sizeof(line)) n = (int)sizeof(line) - prefix - 1;
+    memcpy(line + prefix, msg, (size_t)n);
+    write_all(line, (uint32_t)(prefix + n));
+    return n;
 }

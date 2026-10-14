@@ -1,7 +1,7 @@
 /*
  * DS5 映射引擎实现 —— 手柄直通版。
  *
- * 手柄状态 → DualSense 0x31 输入报告。按键位布局遵循内核
+ * 手柄状态 → DualSense 0x01 输入报告。按键位布局遵循内核
  * hid-playstation.c 的 USB 输入报告（与 DS5Dongle 的抓包模板一致）。
  *
  * 输入源：手柄帧（hidkit 归一化，见 input_queue.h 的 PAD 布局）——
@@ -20,7 +20,7 @@
 #include "input_queue.h"  // INQ_PAD_PAYLOAD（手柄帧布局）
 #include "hidkit.h"       // hidkit BTN_*（手柄按键统一词表）
 
-// 报文偏移（0x31 输入报告，Report ID 之后）
+// 报文偏移（0x01 输入报告，Report ID 之后）
 #define OFF_LX      0u
 #define OFF_LY      1u
 #define OFF_RX      2u

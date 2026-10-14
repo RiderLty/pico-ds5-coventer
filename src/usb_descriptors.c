@@ -1,9 +1,7 @@
 /*
- * DS5（DualSense）HID-only 设备描述符。
- *
- * 设备/报告描述符的格式与字节值取自 awalol/DS5Dongle（src/usb_descriptors.cpp），
- * 在其基础上去掉音频（UAC）接口：HID 接口重排为接口 0，
- * 端点重排为 IN 0x81 / OUT 0x02。报告描述符 321 字节逐字节照搬。
+ * DS5（DualSense）设备描述符：UAC1 音频接口 0-2 + HID 手柄接口 3。
+ * 基线取自 awalol/DS5Dongle，DS5 端点 IN 0x84 / OUT 0x03。
+ * 运行期可追加鼠标/键盘 HID 接口，保持 DS5 身份与既有接口编号不变。
  */
 
 #include "tusb.h"
@@ -36,21 +34,9 @@ tusb_desc_device_t const desc_device = {
     .bNumConfigurations = 0x01
 };
 
-// RAM 副本：const 原件落 flash（XIP），直接写入会被硬件静默丢弃 —— 运行期
-// 改身份必须改 RAM（pico-hid-mapper 同款教训，见其 tud_descriptor_device_cb）
-static tusb_desc_device_t desc_device_ram;
-
 uint8_t const *tud_descriptor_device_cb(void)
 {
-    desc_device_ram = desc_device;
-
-    // 键鼠输出接口启用 → 接口结构不再是纯 DS5：VID 换成 0x0450（PID/字符串
-    // 不动，pico-hid-mapper 的默认身份同款）。主机按 VID/PID 缓存驱动绑定，
-    // 同 VID/PID 而接口组合变化会导致 PC 端绑定失败（TinyUSB 官方注释明言）。
-    if (usb_km_kbd_enabled() || usb_km_mouse_enabled()) {
-        desc_device_ram.idVendor = 0x0450;
-    }
-    return (uint8_t const *)&desc_device_ram;
+    return (uint8_t const *)&desc_device;
 }
 
 //--------------------------------------------------------------------
@@ -201,8 +187,8 @@ _Static_assert(sizeof(desc_configuration) == CONFIG_TOTAL_LEN,
 // flash 基线 = DS5 + 音频（上文数组）；按需在**末尾**追加 16bit 鼠标接口
 // （itf 4 / EP 0x86）与 NKRO 键盘接口（itf 5 / EP 0x87），回填 wTotalLength /
 // bNumInterfaces / 键盘的 bInterfaceNumber（接口号必须连续）。追加在末尾是
-// 有意的：不改动既有接口编号（音频 IAD 引用 itf 1/2、AC 描述符的
-// baInterfaceNr 等），主机缓存影响最小。
+// 有意的：不改动既有接口编号（AC 描述符的 baInterfaceNr 引用 itf 1/2 等），
+// 保持原有 DS5/音频布局。
 //--------------------------------------------------------------------
 
 enum {
@@ -217,16 +203,14 @@ enum {
 #define KM_ITF_DESC_LEN   25u
 #define KM_DESC_MAX       (CONFIG_TOTAL_LEN + 2u * KM_ITF_DESC_LEN)
 
-// 键盘/鼠标端点（与 DS5 的 0x84 IN/0x03 OUT、音频的 0x82 IN/0x01,0x03 OUT 无冲突）
+// 键盘/鼠标端点（与 DS5 的 0x84 IN/0x03 OUT、音频的 0x82 IN/0x01 OUT 无冲突）
 #define EPNUM_MOUSE_IN    0x86
 #define EPNUM_MOUSE_SIZE  8u    // 报文仅 6 字节，8 是鼠标端点的常规值
 #define EPNUM_KBD_IN      0x87
-#define EPNUM_KBD_SIZE    16u   // NKRO 报告 1+14=15 字节，16 足够且是 2 的幂
+#define EPNUM_KBD_SIZE    16u   // NKRO：1B Report ID + 1B 修饰键 + 14B 位图
 
 // 接口描述符里 bInterfaceNumber 的位置（追加块内偏移 2）
 #define KM_ITF_BNUM_OFFSET      2u
-// bInterval 是追加块的末字节（TUD_HID_DESCRIPTOR 块内偏移 24）
-#define KM_ITF_BINTERVAL_OFFSET 24u
 _Static_assert(KM_ITF_DESC_LEN == 25u, "TUD_HID_DESCRIPTOR 展开长度变化，偏移需重算");
 
 // 鼠标接口块：HID 类、协议 None（**不能用 boot 协议**——boot 鼠标只有 3 字节

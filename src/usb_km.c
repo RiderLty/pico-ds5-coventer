@@ -26,16 +26,26 @@
 // 全部状态 BSS 静态初始化（全关 = 全零）。usb_km_apply 在 usb_km_task 的
 // 状态切换（重枚举窗口）内惰性执行：boot 时未应用 → 配置描述符回调返回
 // flash 基线（与无 km 模块时逐字节一致）；enable_km 请求 → tud_disconnect →
-// apply → tud_connect。无 init 函数、无运行时分配、无运行期自旋锁认领。
+// apply → tud_connect。队列临界区在双核启动前由 usb_km_init 初始化。
 
 // Lua 请求（core1 写，原子）
 static volatile bool s_req_kbd;
 static volatile bool s_req_mouse;
 
 // 已生效状态（core0 私有；apply 与重枚举都在 core0）。
-// s_kbd/s_mouse 及全部队列/状态均为 BSS 静态初始化（全关 = 全零），
-// 无 init 函数、无运行时分配 —— usb_km_init 已删除。
+// 状态默认全关，队列锁在双核启动前初始化。
 static bool s_kbd, s_mouse;
+
+void usb_km_init(void)
+{
+    kbd_out_init();
+    mouse_queue_init();
+    s_kbd = false;
+    s_mouse = false;
+    __atomic_store_n(&s_req_kbd, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_req_mouse, false, __ATOMIC_RELAXED);
+    debug_printf("[DS5C][KM] queues initialized\n");
+}
 
 void usb_km_request(bool kbd, bool mouse)
 {
@@ -61,14 +71,17 @@ void usb_km_task(void)
     if (kbd == s_kbd && mouse == s_mouse) return;
 
     bool was_inited = tud_inited();
+    debug_printf("[DS5C][KM] reload: old(kbd=%d mouse=%d) -> "
+                 "new(kbd=%d mouse=%d), inited=%d mounted=%d\n",
+                 s_kbd, s_mouse, kbd, mouse, was_inited, tud_mounted());
     if (was_inited) {
-        debug_printf("[DS5C][KM] disconnecting...\n");
         tud_disconnect();
         sleep_ms(500);   // 让主机完成"设备拔出"，重枚举期间 DS5 上报暂停
     }
 
     usb_km_apply(mouse, kbd);
-    kbd_hid_set_instance(kbd ? (uint8_t)(1u + (mouse ? 1u : 0u)) : KBD_HID_INST_NONE);
+    uint8_t kbd_instance = kbd ? (uint8_t)(1u + (mouse ? 1u : 0u)) : KBD_HID_INST_NONE;
+    kbd_hid_set_instance(kbd_instance);
 
     // 关闭侧清队列/状态，防粘键与陈旧位移
     kbd_out_set_enabled(kbd);
@@ -78,9 +91,8 @@ void usb_km_task(void)
     s_mouse = mouse;
 
     if (was_inited) {
-        debug_printf("[DS5C][KM] connecting...\n");
         tud_connect();
-        debug_printf("[DS5C][KM] re-enumerated: kbd=%d mouse=%d\n", kbd, mouse);
+        debug_printf("[DS5C][KM] reconnect requested; waiting for host enumeration\n");
     }
 }
 

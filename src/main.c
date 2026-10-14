@@ -5,7 +5,7 @@
  *   input_app —— hidkit 解析键鼠 / HID 手柄，XInput 走独立类驱动，
  *   Switch Pro（057e:2009/2006/2007）由握手库先行消费应答；事件经跨核队列上送。
  * 输出（core0，原生 USB Device）：模拟 DS5（VID 0x054C / PID 0x0CE6），
- *   队列出队映射成 0x31 输入报告，按主机 1kHz 轮询节奏发送。
+ *   队列出队映射成 0x01 输入报告，按主机 1kHz 轮询节奏发送。
  * TinyUSB 中 roothub port0 是原生 USB 控制器，roothub port1 是 pico-pio-usb。
  */
 
@@ -21,7 +21,7 @@
 #include "input_app.h"
 #include "ds5_pad.h"
 #include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
-#include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（L1：编入但默认全关）
+#include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（Lua 请求热重载）
 #include "lua_binder.h"
 #include "lua_default_script.h"   // 预制脚本（CMake 自动 embed，无动态加载）
 
@@ -108,6 +108,8 @@ int main(void) {
   // 初始化跨核队列与临界区。必须先于 core1 启动：
   // 生产者随时可能入队，自旋锁必须先就绪
   input_queue_init();
+  // 键鼠队列在启动 core1 前通过 SDK 初始化临界区，兼容 RP2350 软件锁。
+  usb_km_init();
 
   multicore_reset_core1();
   // 默认 core1 栈只有 2KB，Lua 解析器（luaL_loadbuffer → luaY_parser）栈深
@@ -126,14 +128,15 @@ int main(void) {
   tusb_init(0, &dev_init);
   ds5_pad_init();
 
-  debug_printf("[DS5C] core0 device ready (PIO-USB @ GPIO12/13)\n");
+  debug_printf("[DS5C] core0 device ready (PIO-USB @ GPIO12/13, tusb_debug=%d)\n",
+               CFG_TUSB_DEBUG);
 
   uint8_t report[DS_REPORT_LEN];
   while (true) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
-    usb_km_task();     // enable_km 请求轮询（无人请求时仅几次原子读；apply 在重枚举窗口内惰性执行）
+    usb_km_task();     // enable_km 请求轮询，apply 在重枚举窗口内执行
     usb_km_service();  // 键鼠输出队列出队（未启用直接返回）
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
@@ -145,6 +148,33 @@ int main(void) {
   }
 
   return 0;
+}
+
+//--------------------------------------------------------------------
+// USB Device lifecycle callbacks (core0)
+//--------------------------------------------------------------------
+
+void tud_mount_cb(void)
+{
+  debug_printf("[DS5C][USB] MOUNTED: cfg=%d speed=%d hid(kbd=%d mouse=%d)\n",
+               tud_mounted(), (int)tud_speed_get(),
+               usb_km_kbd_enabled(), usb_km_mouse_enabled());
+}
+
+void tud_umount_cb(void)
+{
+  debug_printf("[DS5C][USB] UMOUNTED: inited=%d mounted=%d\n",
+               tud_inited(), tud_mounted());
+}
+
+void tud_suspend_cb(bool remote_wakeup_en)
+{
+  debug_printf("[DS5C][USB] SUSPEND: remote_wakeup=%d\n", remote_wakeup_en);
+}
+
+void tud_resume_cb(void)
+{
+  debug_printf("[DS5C][USB] RESUME\n");
 }
 
 //--------------------------------------------------------------------

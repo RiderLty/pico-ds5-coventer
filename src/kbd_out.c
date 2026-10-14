@@ -11,27 +11,27 @@
 #define KBD_OUT_QUEUE_SIZE  16
 #define KBD_OUT_QUEUE_MASK  (KBD_OUT_QUEUE_SIZE - 1)
 
-// 固定自旋锁号（编译期静态初始化，零运行时分配/分支）：
-// 18 = SDK 保留给 OS 软件的区间（本工程无 OS）；claim 池 24-31 由
-// debug/input_queue 运行期认领，与这里永不相交。
-#define KBD_OUT_SPINLOCK_ID 18u
-#define KM_SPIN_LOCK_INSTANCE(id) \
-    ((spin_lock_t *)(SIO_BASE + SIO_SPINLOCK0_OFFSET + (id) * 4u))
-
-static critical_section_t cs = {
-    .spin_lock = KM_SPIN_LOCK_INSTANCE(KBD_OUT_SPINLOCK_ID),
-};
+static critical_section_t cs;
 
 static kbd_out_state_t queue[KBD_OUT_QUEUE_SIZE];
 static uint16_t head = 0;
 static uint16_t tail = 0;
 static uint16_t count = 0;
-static critical_section_t cs;
-
 // 当前累积状态（只在临界区内读写，故 core0/core1 都可安全调用下面的接口）
 static kbd_out_state_t s_state;
 
-static bool s_enabled = false;   // BSS 静态初始化：队列/索引/状态全零，无需运行期 init
+static bool s_enabled = false;
+
+void kbd_out_init(void)
+{
+  // 队列临界区不嵌套其他锁，用 SDK striped 池，保留独占锁给 USB 栈。
+  // SDK API 会在 RP2350 上选择软件锁地址，不能手工构造 SIO 寄存器指针。
+  critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
+  head = tail = count = 0;
+  memset(queue, 0, sizeof(queue));
+  memset(&s_state, 0, sizeof(s_state));
+  s_enabled = false;
+}
 
 //--------------------------------------------------------------------+
 // 开关（重枚举切换时由 usb_km_task 调用；清队列防粘键）
