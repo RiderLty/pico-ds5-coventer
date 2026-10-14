@@ -4,3 +4,12 @@
 [submodule "lib/pico_pio_usb"]
 	path = lib/pico_pio_usb
 	url = https://github.com/sekigon-gonnoc/Pico-PIO-USB.git
+[submodule "lib/hidkit"]
+	path = lib/hidkit
+	url = https://github.com/RiderLty/hidkit.git
+[submodule "lib/hidkit-tusb-xinput"]
+	path = lib/hidkit-tusb-xinput
+	url = https://github.com/RiderLty/hidkit-tusb-xinput.git
+[submodule "lib/hidkit-tusb-switch-pro"]
+	path = lib/hidkit-tusb-switch-pro
+	url = https://github.com/RiderLty/hidkit-tusb-switch-pro.git

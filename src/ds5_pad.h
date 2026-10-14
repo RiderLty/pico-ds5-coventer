@@ -27,6 +27,10 @@ void ds5_pad_feed_kb(const uint8_t *report, uint8_t len);
 // 喂入打包鼠标帧：buttons u8, wheel i8, x i16, y i16（小端，共 7 字节）
 void ds5_pad_feed_ms(const uint8_t *data, uint8_t len);
 
+// 喂入手柄帧（INQ_KIND_PAD 负载，15 字节，布局见 input_queue.h）。
+// flags bit0=0 视为断连：清手柄状态并回落键鼠映射。
+void ds5_pad_feed_pad(const uint8_t *data, uint8_t len);
+
 // 周期处理：摇杆回中衰减、触摸板超时松开（主循环每轮调用）
 void ds5_pad_tick(void);
 

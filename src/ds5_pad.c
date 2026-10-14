@@ -1,8 +1,13 @@
 /*
  * DS5 映射引擎实现。
  *
- * 键鼠状态 → DualSense 0x31 输入报告。按键位布局遵循内核
+ * 输入状态 → DualSense 0x31 输入报告。按键位布局遵循内核
  * hid-playstation.c 的 USB 输入报告（与 DS5Dongle 的抓包模板一致）。
+ *
+ * 输入源与合并（过渡占位，后期由 Lua 接管）：
+ *   - 键鼠：WASD → 左摇杆、鼠标速度 → 右摇杆、按键查表映射（原有行为）
+ *   - 手柄（XInput / Switch Pro / DS5，经 hidkit 归一化）：已连接时
+ *     摇杆/扳机/十字键直通覆盖，按键与键鼠映射取并集
  */
 
 #include <string.h>
@@ -10,9 +15,12 @@
 
 #include "pico/time.h"
 
+#include "hidkit.h"       // hidkit BTN_*（手柄按键统一词表）；须先于 config.h ——
+                          // 后者的 KEY_* 有 #ifndef 守卫，让位给 hidkit 同名宏
 #include "config.h"
 #include "ds5_pad.h"
-#include "hid_parser.h"   // hid_mouse_frame_t 的打包格式约定
+#include "input_queue.h"  // INQ_PAD_PAYLOAD（手柄帧布局）
+#include "debug.h"
 
 // 报文偏移（0x31 输入报告，Report ID 之后）
 #define OFF_LX      0u
@@ -67,6 +75,12 @@ static float    s_vel_x, s_vel_y;   // 鼠标速度 EMA（计数/ms）→ 右摇
 static float    s_pending_x, s_pending_y; // 距上次 tick 的未处理位移
 static uint64_t s_last_tick_us;     // 上次 update_right_stick 的时间
 static uint8_t  s_seq;              // 输入报告序号
+
+// 手柄输入状态（hidkit 归一化：轴 -32767..32767，扳机 0..255）
+static bool     s_pad_connected;
+static int16_t  s_pad_lsx, s_pad_lsy, s_pad_rsx, s_pad_rsy;
+static uint8_t  s_pad_lt, s_pad_rt;
+static uint32_t s_pad_btnmask;      // bit n = hidkit BTN_* n 按住
 
 // 触摸板镜像
 #if TOUCHPAD_MIRROR
@@ -180,6 +194,52 @@ void ds5_pad_feed_ms(const uint8_t *data, uint8_t len)
 #endif
 }
 
+// hidkit BTN_* → DS5 按钮；0xFF = 不映射
+static uint8_t pad_btn_to_ds5(uint8_t btn)
+{
+    switch (btn) {
+    case BTN_A:      return BTN_CROSS;
+    case BTN_B:      return BTN_CIRCLE;
+    case BTN_X:      return BTN_SQUARE;
+    case BTN_Y:      return BTN_TRIANGLE;
+    case BTN_LB:     return BTN_L1;
+    case BTN_RB:     return BTN_R1;
+    case BTN_SELECT: return BTN_CREATE;
+    case BTN_START:  return BTN_OPTIONS;
+    case BTN_LS:     return BTN_L3;
+    case BTN_RS:     return BTN_R3;
+    case BTN_HOME:   return BTN_PS;
+    case BTN_MISC:   return BTN_TOUCH_CLICK;
+    default:         return 0xFF;
+    }
+}
+
+void ds5_pad_feed_pad(const uint8_t *data, uint8_t len)
+{
+    if (len < INQ_PAD_PAYLOAD) return;
+
+    if (!(data[0] & 0x01u)) {
+        // 断连标记：清状态，回落键鼠映射
+        s_pad_connected = false;
+        s_pad_btnmask = 0;
+        s_pad_lt = s_pad_rt = 0;
+        s_pad_lsx = s_pad_lsy = s_pad_rsx = s_pad_rsy = 0;
+        return;
+    }
+
+    s_pad_connected = true;
+    s_pad_lsx = (int16_t)(data[1] | ((uint16_t)data[2] << 8));
+    s_pad_lsy = (int16_t)(data[3] | ((uint16_t)data[4] << 8));
+    s_pad_rsx = (int16_t)(data[5] | ((uint16_t)data[6] << 8));
+    s_pad_rsy = (int16_t)(data[7] | ((uint16_t)data[8] << 8));
+    s_pad_lt = data[9];
+    s_pad_rt = data[10];
+    s_pad_btnmask = (uint32_t)data[11]
+                  | ((uint32_t)data[12] << 8)
+                  | ((uint32_t)data[13] << 16)
+                  | ((uint32_t)data[14] << 24);
+}
+
 // WASD → 左摇杆
 static void update_left_stick(void)
 {
@@ -200,25 +260,25 @@ static void update_left_stick(void)
     s_report[OFF_LY] = (uint8_t)ly;
 }
 
+// 四方向 → hat 值
+static uint8_t hat_from_dirs(bool up, bool down, bool left, bool right)
+{
+    if (up && right)       return HAT_NE;
+    if (down && right)     return HAT_SE;
+    if (down && left)      return HAT_SW;
+    if (up && left)        return HAT_NW;
+    if (up)                return HAT_N;
+    if (right)             return HAT_E;
+    if (down)              return HAT_S;
+    if (left)              return HAT_W;
+    return HAT_CENTER;
+}
+
 // 方向键 → hat（byte7 低 4 位）
 static void update_hat(void)
 {
-    bool up    = key_held(KEY_UP);
-    bool down  = key_held(KEY_DOWN);
-    bool left  = key_held(KEY_LEFT);
-    bool right = key_held(KEY_RIGHT);
-
-    uint8_t hat;
-    if (up && right)       hat = HAT_NE;
-    else if (down && right) hat = HAT_SE;
-    else if (down && left)  hat = HAT_SW;
-    else if (up && left)    hat = HAT_NW;
-    else if (up)            hat = HAT_N;
-    else if (right)         hat = HAT_E;
-    else if (down)          hat = HAT_S;
-    else if (left)          hat = HAT_W;
-    else                    hat = HAT_CENTER;
-
+    uint8_t hat = hat_from_dirs(key_held(KEY_UP), key_held(KEY_DOWN),
+                                key_held(KEY_LEFT), key_held(KEY_RIGHT));
     s_report[OFF_BTN0] = (uint8_t)((s_report[OFF_BTN0] & 0xF0u) | hat);
 }
 
@@ -244,9 +304,14 @@ static void update_key_buttons(void)
     if ((b = mod_to_btn(MOD_BIT_RCTRL,  MAP_MOD_RCTRL_TO))  != 0xFF) btn_set(b, true);
 }
 
-// 鼠标按键 → 扳机 / 中键
+// 鼠标按键 → 扳机 / 中键（手柄已连接时扳机由手柄驱动，跳过）
 static void update_mouse_buttons(void)
 {
+    if (s_pad_connected) {
+        btn_set(MAP_MOUSE_M_TO, (s_ms_buttons & 0x04u) != 0);
+        return;
+    }
+
     bool l = (s_ms_buttons & 0x01u) != 0;   // 左键 → R2 模拟扳机
     bool r = (s_ms_buttons & 0x02u) != 0;   // 右键 → L2 模拟扳机
     bool m = (s_ms_buttons & 0x04u) != 0;
@@ -315,6 +380,48 @@ static void update_touchpad(void)
 #endif
 }
 
+// ---- 手柄（已连接时在键鼠路径之后调用，覆盖摇杆/扳机/十字键，按键取并集）----
+
+// hidkit 归一化轴 -32767..32767 → DS5 摇杆 0..255（中心 128）
+static uint8_t stick_to_u8(int16_t v)
+{
+    int32_t out = 128 + ((int32_t)v * 127) / 32767;
+    if (out < 0) out = 0;
+    if (out > 255) out = 255;
+    return (uint8_t)out;
+}
+
+// 摇杆/扳机直通覆盖（L2/R2 数字位在 update_pad_buttons 补）
+static void update_pad_sticks(void)
+{
+    s_report[OFF_LX] = stick_to_u8(s_pad_lsx);
+    s_report[OFF_LY] = stick_to_u8(s_pad_lsy);
+    s_report[OFF_RX] = stick_to_u8(s_pad_rsx);
+    s_report[OFF_RY] = stick_to_u8(s_pad_rsy);
+    s_report[OFF_L2] = s_pad_lt;
+    s_report[OFF_R2] = s_pad_rt;
+
+    uint8_t hat = hat_from_dirs(s_pad_btnmask & (1u << BTN_DPAD_UP),
+                                s_pad_btnmask & (1u << BTN_DPAD_DOWN),
+                                s_pad_btnmask & (1u << BTN_DPAD_LEFT),
+                                s_pad_btnmask & (1u << BTN_DPAD_RIGHT));
+    s_report[OFF_BTN0] = (uint8_t)((s_report[OFF_BTN0] & 0xF0u) | hat);
+}
+
+// 手柄按键与键鼠映射取并集（在 update_key_buttons / update_mouse_buttons 清位之后）
+static void update_pad_buttons(void)
+{
+    for (uint8_t b = BTN_A; b <= BTN_EXTRA_8; b++) {
+        if (s_pad_btnmask & (1u << b)) {
+            uint8_t ds = pad_btn_to_ds5(b);
+            if (ds != 0xFF) btn_set(ds, true);
+        }
+    }
+    // 扳机数字位（模拟值已在 update_pad_sticks 写入）
+    if (s_pad_lt) s_report[OFF_BTN1] |= 0x04u;
+    if (s_pad_rt) s_report[OFF_BTN1] |= 0x08u;
+}
+
 void ds5_pad_tick(void)
 {
     update_left_stick();
@@ -322,6 +429,10 @@ void ds5_pad_tick(void)
     update_key_buttons();
     update_mouse_buttons();
     update_right_stick();
+    if (s_pad_connected) {
+        update_pad_sticks();
+        update_pad_buttons();
+    }
     update_touchpad();
 }
 

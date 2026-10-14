@@ -1,7 +1,7 @@
 /*
  * 跨核传输层实现：SPSC 字节块队列，按 kind 分发到 DS5 映射引擎。
  *
- * 数据通路：core1（hid_output → out_device）入队
+ * 数据通路：core1（input_app）入队
  *           → critical_section 保护的 SPSC 队列
  *           → core0 主循环 input_queue_flush() 批量出队 → ds5_pad_feed_*
  */
@@ -13,6 +13,7 @@
 
 #include "input_queue.h"
 #include "ds5_pad.h"
+#include "debug.h"
 
 #define INQ_QUEUE_DEPTH  128u   // 2 的幂（掩码索引）
 #define INQ_FLUSH_BUDGET 32u    // core0 每轮最多出队块数，防止饿死 tud_task()
@@ -62,9 +63,11 @@ void input_queue_send(uint8_t kind, const void *data, uint8_t len)
 
 void input_queue_flush(void)
 {
+    uint32_t dropped = 0;
     for (uint8_t budget = INQ_FLUSH_BUDGET; budget; budget--) {
         critical_section_enter_blocking(&s_cs);
         if (s_count == 0) {
+            dropped = s_dropped;
             s_dropped = 0;
             critical_section_exit(&s_cs);
             break;
@@ -83,6 +86,13 @@ void input_queue_flush(void)
             ds5_pad_feed_kb(data, len);
         } else if (kind == INQ_KIND_MS) {
             ds5_pad_feed_ms(data, len);
+        } else if (kind == INQ_KIND_PAD) {
+            ds5_pad_feed_pad(data, len);
         }
+    }
+
+    // 丢弃计数在临界区外打日志：日志锁与临界区锁分离，临界区内不再取第二把锁
+    if (dropped) {
+        debug_printf("[DS5C][Q] dropped %lu record(s)\n", (unsigned long)dropped);
     }
 }

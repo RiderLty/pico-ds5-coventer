@@ -100,17 +100,33 @@ typedef struct {
 #define MAP_MOD_RSHIFT_TO   0xFF
 #define MAP_MOD_RCTRL_TO    0xFF
 
-// WASD 移动键 keycodes
+// WASD 移动键 keycodes（与 hidkit_codes.h 的 KEY_* 同值同名，守卫避免重定义）
+#ifndef KEY_W
 #define KEY_W 0x1A
+#endif
+#ifndef KEY_A
 #define KEY_A 0x04
+#endif
+#ifndef KEY_S
 #define KEY_S 0x16
+#endif
+#ifndef KEY_D
 #define KEY_D 0x07
+#endif
 
 // 方向键 → 十字键 keycodes
+#ifndef KEY_UP
 #define KEY_UP    0x52
+#endif
+#ifndef KEY_DOWN
 #define KEY_DOWN  0x51
+#endif
+#ifndef KEY_LEFT
 #define KEY_LEFT  0x50
+#endif
+#ifndef KEY_RIGHT
 #define KEY_RIGHT 0x4F
+#endif
 
 // 鼠标按键（hid_mouse_frame_t.buttons 的位）→ DS5
 // bit0 = 左键, bit1 = 右键, bit2 = 中键

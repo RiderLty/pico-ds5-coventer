@@ -27,5 +27,20 @@ if(Git_FOUND)
     endif()
 endif()
 
+# ── hidkit 解析库（HID/XInput 语义解析）与适配器：git 子模块 ──────────────
+#   lib/hidkit                  —— 纯 C、零平台依赖的解析 core（不碰 USB 栈，只吃
+#                                  描述符与报文，吐标准事件；src/input_app.c 是接线层）
+#   lib/hidkit-tusb-xinput      —— XInput 类驱动 + 归一化接线（Xbox 没有 HID 接口，
+#                                  走独立类驱动；驱动经 input_app.c 的
+#                                  usbh_app_driver_get_cb 注册）
+#   lib/hidkit-tusb-switch-pro  —— Switch Pro USB 握手（枚举后主机不握手完全静默，
+#                                  手柄需子命令使能上报/读 SPI 校准）；发送走
+#                                  tuh_hid_send_report（标准 HID host API，非类驱动）
+# ── Lua 5.4.6（引擎脚本；vendored 拷贝自 pico-hid-mapper/lib/lua-5.4.6/src，
+#    非 submodule —— 与 mapper 的管理方式一致）────────────────────────────
+add_subdirectory(lib/lua-5.4.6/src)
+add_subdirectory(lib/hidkit)
+add_subdirectory(lib/hidkit-tusb-xinput)
+add_subdirectory(lib/hidkit-tusb-switch-pro)
 add_subdirectory(lib/pico_pio_usb)
 add_subdirectory(src)

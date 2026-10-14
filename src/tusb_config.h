@@ -39,9 +39,10 @@
 #endif
 
 //------------- CLASS -------------//
-// HID（模拟 DS5 手柄）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
+// HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标接口，
+// 见 usb_km.c 的 enable_km 路径）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
 #define CFG_TUD_CDC              0
-#define CFG_TUD_HID              1    // instance 0 = DS5 手柄
+#define CFG_TUD_HID              3
 #define CFG_TUD_AUDIO            1
 #define CFG_TUD_VENDOR           0
 
@@ -78,6 +79,9 @@
 #define CFG_TUH_HID                  16
 #define CFG_TUH_HID_EPIN_BUFSIZE    64
 #define CFG_TUH_HID_EPOUT_BUFSIZE   64
+
+// XInput 类驱动（Xbox 手柄没有 HID 接口，走独立类驱动；驱动注册见 input_app.c）
+#define CFG_TUH_XINPUT 1
 
 #ifdef __cplusplus
  }
