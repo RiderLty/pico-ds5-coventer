@@ -9,11 +9,6 @@
 #include "tusb.h"
 
 #include "ds5_pad.h"
-#include "usb_km.h"       // usb_km_apply（动态组装配置描述符）
-#include "kbd_hid.h"      // KBD_HID_REPORT_DESC_LEN（NKRO 键盘接口，可选追加）
-#include "mouse_hid.h"    // MOUSE_HID_DESC_LEN（16bit 鼠标接口，可选追加）
-#include "debug.h"
-#include <string.h>
 
 //--------------------------------------------------------------------
 // Device Descriptor
@@ -184,104 +179,10 @@ uint8_t const desc_configuration[] = {
 _Static_assert(sizeof(desc_configuration) == CONFIG_TOTAL_LEN,
                "config descriptor length mismatch");
 
-//--------------------------------------------------------------------
-// 动态组装（参考 pico-hid-mapper 的 usb_desc_config_apply）：
-// flash 基线 = DS5 + 音频（上文数组）；按需在**末尾**追加 16bit 鼠标接口
-// （itf 4 / EP 0x86）与 NKRO 键盘接口（itf 5 / EP 0x87），回填 wTotalLength /
-// bNumInterfaces / 键盘的 bInterfaceNumber（接口号必须连续）。追加在末尾是
-// 有意的：不改动既有接口编号（音频 IAD 引用 itf 1/2、AC 描述符的
-// baInterfaceNr 等），主机缓存影响最小。
-//--------------------------------------------------------------------
-
-enum {
-    STRID_LANGID = 0,
-    STRID_MANUFACTURER,
-    STRID_PRODUCT,
-    STRID_MOUSE,     // 3: 16bit 鼠标接口（仅启用时的配置描述符引用）
-    STRID_KBD,       // 4: NKRO 键盘接口（同上）
-};
-
-// 追加块 = TUD_HID_DESCRIPTOR 展开：接口 9 + HID 9 + 端点 7 = 25 字节
-#define KM_ITF_DESC_LEN   25u
-#define KM_DESC_MAX       (CONFIG_TOTAL_LEN + 2u * KM_ITF_DESC_LEN)
-
-// 键盘/鼠标端点（与 DS5 的 0x84 IN/0x03 OUT、音频的 0x82 IN/0x01,0x03 OUT 无冲突）
-#define EPNUM_MOUSE_IN    0x86
-#define EPNUM_MOUSE_SIZE  8u    // 报文仅 6 字节，8 是鼠标端点的常规值
-#define EPNUM_KBD_IN      0x87
-#define EPNUM_KBD_SIZE    16u   // NKRO 报告 1+14=15 字节，16 足够且是 2 的幂
-
-// 接口描述符里 bInterfaceNumber 的位置（追加块内偏移 2）
-#define KM_ITF_BNUM_OFFSET      2u
-// bInterval 是追加块的末字节（TUD_HID_DESCRIPTOR 块内偏移 24）
-#define KM_ITF_BINTERVAL_OFFSET 24u
-_Static_assert(KM_ITF_DESC_LEN == 25u, "TUD_HID_DESCRIPTOR 展开长度变化，偏移需重算");
-
-// 鼠标接口块：HID 类、协议 None（**不能用 boot 协议**——boot 鼠标只有 3 字节
-// 报文格式，与本项目的 6 字节 16bit 轴不符）
-static uint8_t const desc_itf_mouse[] = {
-    TUD_HID_DESCRIPTOR(4, STRID_MOUSE, HID_ITF_PROTOCOL_NONE, MOUSE_HID_DESC_LEN,
-                       EPNUM_MOUSE_IN, EPNUM_MOUSE_SIZE, 1),
-};
-// NKRO 键盘接口块：协议 None（boot 键盘只认 6KRO 固定格式，本键盘用 NKRO 位图）
-static uint8_t const desc_itf_kbd[] = {
-    TUD_HID_DESCRIPTOR(5, STRID_KBD, HID_ITF_PROTOCOL_NONE, KBD_HID_REPORT_DESC_LEN,
-                       EPNUM_KBD_IN, EPNUM_KBD_SIZE, 1),
-};
-
-_Static_assert(sizeof(desc_itf_mouse) == KM_ITF_DESC_LEN &&
-               sizeof(desc_itf_kbd) == KM_ITF_DESC_LEN,
-               "追加接口块长度与 KM_ITF_DESC_LEN 不一致");
-
-static uint8_t  s_cfg_desc_ram[KM_DESC_MAX] __attribute__((aligned(4)));
-static uint16_t s_cfg_desc_len = 0;   // 0 = 尚未组装（回调返回 flash 基线）
-
-void usb_km_apply(bool mouse, bool kbd)
-{
-    memcpy(s_cfg_desc_ram, desc_configuration, sizeof(desc_configuration));
-    uint16_t len = (uint16_t)sizeof(desc_configuration);
-    uint8_t  itf_count = 4u;   // 基线：音频 0-2 + DS5 3
-
-    uint16_t kbd_off = 0;
-
-    if (mouse) {
-        memcpy(s_cfg_desc_ram + len, desc_itf_mouse, sizeof(desc_itf_mouse));
-        len = (uint16_t)(len + sizeof(desc_itf_mouse));
-        itf_count++;
-    }
-
-    if (kbd) {
-        kbd_off = len;
-        memcpy(s_cfg_desc_ram + len, desc_itf_kbd, sizeof(desc_itf_kbd));
-        // 接口号必须连续：音频 0-2 / DS5 3 / [鼠标 4] / 键盘紧随其后。
-        // 描述符数组里的占位编号（5）只在"无鼠标"时需要回填成 4。
-        s_cfg_desc_ram[kbd_off + KM_ITF_BNUM_OFFSET] = itf_count;
-        len = (uint16_t)(len + sizeof(desc_itf_kbd));
-        itf_count++;
-    }
-
-    // 回填 wTotalLength(offset 2, LE) 与 bNumInterfaces(offset 4)
-    s_cfg_desc_ram[2] = (uint8_t)(len & 0xFF);
-    s_cfg_desc_ram[3] = (uint8_t)(len >> 8);
-    s_cfg_desc_ram[4] = itf_count;
-
-    s_cfg_desc_len = len;
-
-    // 自检：两项都不追加时，RAM 副本必须与 flash 基线逐字节一致，
-    // 否则说明基线构造/回填有偏差，会静默改变主机看到的接口布局
-    if (!mouse && !kbd &&
-        memcmp(s_cfg_desc_ram, desc_configuration, sizeof(desc_configuration)) != 0) {
-        debug_printf("[DS5C][KM] BUG: config desc RAM copy != baseline\n");
-    }
-
-    debug_printf("[DS5C][KM] config desc: %u B, %u itf, mouse=%d kbd=%d\n",
-                 (unsigned)len, (unsigned)itf_count, mouse, kbd);
-}
-
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;   // 只有一份配置
-    return s_cfg_desc_len ? s_cfg_desc_ram : desc_configuration;
+    return desc_configuration;
 }
 
 //--------------------------------------------------------------------
@@ -454,14 +355,7 @@ _Static_assert(sizeof(desc_hid_report_ds) == HID_REPORT_DESC_LEN,
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf)
 {
-    // 按 TinyUSB HID 实例号分发（实例按配置描述符里接口出现顺序分配：
-    // DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无，见 usb_km.c 的 set_instance）
-    if (usb_km_mouse_enabled() && itf == MOUSE_HID_INSTANCE) {
-        return mouse_hid_report_desc();
-    }
-    if (kbd_hid_enabled() && itf == kbd_hid_instance()) {
-        return kbd_hid_report_desc();
-    }
+    (void)itf;
     return desc_hid_report_ds;
 }
 
@@ -473,8 +367,12 @@ static char const *string_desc_arr[] = {
     (const char[]){ 0x09, 0x04 },     // 0: English (0x0409)
     "Sony Interactive Entertainment", // 1: Manufacturer
     "DualSense Wireless Controller",  // 2: Product
-    "Mouse",                          // 3: 16bit 鼠标接口（仅启用时引用）
-    "Keyboard",                       // 4: NKRO 键盘接口（仅启用时引用）
+};
+
+enum {
+    STRID_LANGID = 0,
+    STRID_MANUFACTURER,
+    STRID_PRODUCT,
 };
 
 static uint16_t _desc_str[60 + 1];
@@ -546,8 +444,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type,
                                uint8_t *buffer, uint16_t reqlen)
 {
-    // 仅 DS5 实例（instance 0）处理；键盘/鼠标实例的 GET_REPORT 无需应答
-    if (itf != 0) return 0;
+    (void)itf;
 
     if (report_type == HID_REPORT_TYPE_INPUT && report_id == 0x01) {
         if (reqlen < 1u + DS_REPORT_LEN) return 0;
@@ -574,15 +471,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            hid_report_type_t report_type,
                            uint8_t const *buffer, uint16_t bufsize)
 {
-    // NKRO 键盘实例：主机写回 LED 状态（Report ID 1 的 output 报告，
-    // bit0-4 = Num/Caps/Scroll/Compose/Kana）
-    if (kbd_hid_enabled() && itf == kbd_hid_instance()) {
-        if (report_type == HID_REPORT_TYPE_OUTPUT && bufsize >= 1) {
-            kbd_hid_set_led(buffer[0]);
-        }
-        return;
-    }
-
+    (void)itf;
     (void)report_id;
     (void)report_type;
     (void)buffer;

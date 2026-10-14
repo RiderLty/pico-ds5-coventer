@@ -4,11 +4,6 @@ add_executable(${target_name})
 target_sources(${target_name} PRIVATE
  main.c
  usb_descriptors.c
- usb_km.c
- kbd_hid.c
- kbd_out.c
- mouse_hid.c
- mouse_queue.c
  input_app.c
  debug.c
  input_queue.c

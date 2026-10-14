@@ -21,7 +21,6 @@
 #include "input_app.h"
 #include "ds5_pad.h"
 #include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
-#include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（enable_km 运行期开关）
 #include "lua_binder.h"
 #include "lua_default_script.h"   // 预制脚本（tools/embed_lua.py 生成，无动态加载）
 
@@ -122,10 +121,6 @@ int main(void) {
     .role  = TUSB_ROLE_DEVICE,
     .speed = TUSB_SPEED_FULL
   };
-  // 键鼠输出接口开关（默认全关）：组装基线描述符、建跨核队列——
-  // 须在 tusb_init 之前；队列先就绪（core1 的 Lua 随时可能入队）
-  usb_km_init();
-
   tusb_init(0, &dev_init);
   ds5_pad_init();
 
@@ -136,8 +131,7 @@ int main(void) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
-    usb_km_task();     // enable_km 请求：动态组装描述符 + 重枚举（默认全关，无请求时零开销）
-    usb_km_service();  // NKRO 键盘 / 16bit 鼠标输出队列出队发送（未启用时直接返回）
+    lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（脚本未定义 tick 时为空操作）
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
     // 未就绪时由主机 NAK 主导节奏，与真实手柄/DS5Dongle 行为一致
