@@ -78,4 +78,10 @@ if(DEBUG_BAUDRATE)
   target_compile_definitions(${target_name} PRIVATE DEBUG_BAUDRATE=${DEBUG_BAUDRATE})
 endif()
 
+# 逐层排查开关（km-l1）：1 = 启用 usb_km_apply + task/service（RAM 描述符路径）
+set(KM_L1_APPLY "" CACHE STRING "km layer bisect: 1=enable apply path")
+if(KM_L1_APPLY)
+  target_compile_definitions(${target_name} PRIVATE KM_L1_APPLY=1)
+endif()
+
 pico_add_extra_outputs(${target_name})

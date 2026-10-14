@@ -23,6 +23,13 @@
 #include "mouse_hid.h"
 #include "mouse_queue.h"
 
+// 逐层排查开关：1 = usb_km_init 调用 usb_km_apply（RAM 描述符路径）+ 主循环
+// 挂 task/service；0（默认，L1a）= 全部旁路，配置描述符走 flash 原路径。
+// CMake -DKM_L1_APPLY=1 切换；排查结束移除。
+#ifndef KM_L1_APPLY
+#define KM_L1_APPLY 0
+#endif
+
 // Lua 请求（core1 写，原子）
 static volatile bool s_req_kbd;
 static volatile bool s_req_mouse;
@@ -36,7 +43,9 @@ void usb_km_init(void)
     kbd_out_init(false);
     mouse_queue_init();
     s_kbd = s_mouse = false;
+#if KM_L1_APPLY   // L1b 起置 1：L1a 阶段不组装，配置描述符走 flash 原路径
     usb_km_apply(false, false);   // 组装基线描述符（全关 = DS5+音频，与历史一致）
+#endif
 }
 
 void usb_km_request(bool kbd, bool mouse)

@@ -135,8 +135,10 @@ int main(void) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
-    usb_km_task();     // enable_km 请求轮询（L1：无人请求，仅几次原子读）
-    usb_km_service();  // 键鼠输出队列出队（L1：未启用直接返回）
+#if KM_L1_APPLY
+    usb_km_task();     // enable_km 请求轮询（L1a：无人请求，仅几次原子读）
+    usb_km_service();  // 键鼠输出队列出队（L1a：未启用直接返回）
+#endif
     lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（脚本未定义 tick 时为空操作）
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
