@@ -123,7 +123,9 @@ int main(void) {
     .speed = TUSB_SPEED_FULL
   };
   // 键鼠输出接口开关（L1：默认全关，无 Lua 绑定 —— 仅验证动态组装基线路径）
+#if !KM_L1_NOINIT
   usb_km_init();
+#endif
 
   tusb_init(0, &dev_init);
   ds5_pad_init();

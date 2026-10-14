@@ -27,6 +27,9 @@
 // 挂 task/service；0（默认，L1a）= 全部旁路，配置描述符走 flash 原路径。
 // CMake -DKM_L1_APPLY=1 切换；排查结束移除。
 #ifndef KM_L1_APPLY
+#ifndef KM_L1_NOINIT
+#define KM_L1_NOINIT 0
+#endif
 #define KM_L1_APPLY 0
 #endif
 
