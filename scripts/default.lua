@@ -83,3 +83,20 @@ end
 function on_dropped(slot, vid, pid)
     print("dropped", slot, string.format("%04x:%04x", vid, pid))
 end
+
+-- tick：主循环每轮调用（不节流），dt = 距上次的微秒差。
+-- L3+L4：上电 5 秒后开启 NKRO 键盘输出接口（仅键盘，鼠标不开）
+local boot_us = 0
+local km_started = false
+local KM_DELAY_US = 5 * 1000 * 1000
+
+function tick(dt_us)
+    if km_started then return end
+    boot_us = boot_us + dt_us
+    if boot_us >= KM_DELAY_US then
+        km_started = true
+        print("enabling keyboard output...")
+        enable_km(true, false)
+        print("enable_km requested (re-enumerating, ~0.5s)")
+    end
+end

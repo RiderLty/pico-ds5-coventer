@@ -1,4 +1,4 @@
-// 自动生成，请勿手动编辑（由 tools/embed_lua.py 从 scripts/default.lua 生成）
+// 自动生成，请勿手动编辑（由 tools/embed_lua.py 从 /Users/lty/projects/pico-ds5-coventer/src/../scripts/default.lua 生成）
 #ifndef LUA_DEFAULT_SCRIPT_H
 #define LUA_DEFAULT_SCRIPT_H
 
@@ -87,6 +87,23 @@ static const char LUA_DEFAULT_SCRIPT[] =
     "\n"
     "function on_dropped(slot, vid, pid)\n"
     "    print(\"dropped\", slot, string.format(\"%04x:%04x\", vid, pid))\n"
+    "end\n"
+    "\n"
+    "-- tick：主循环每轮调用（不节流），dt = 距上次的微秒差。\n"
+    "-- L3+L4：上电 5 秒后开启 NKRO 键盘输出接口（仅键盘，鼠标不开）\n"
+    "local boot_us = 0\n"
+    "local km_started = false\n"
+    "local KM_DELAY_US = 5 * 1000 * 1000\n"
+    "\n"
+    "function tick(dt_us)\n"
+    "    if km_started then return end\n"
+    "    boot_us = boot_us + dt_us\n"
+    "    if boot_us >= KM_DELAY_US then\n"
+    "        km_started = true\n"
+    "        print(\"enabling keyboard output...\")\n"
+    "        enable_km(true, false)\n"
+    "        print(\"enable_km requested (re-enumerating, ~0.5s)\")\n"
+    "    end\n"
     "end\n"
     "\n"
     ;
