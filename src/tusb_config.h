@@ -42,7 +42,7 @@
 // HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标接口，
 // 见 usb_km.c 的 enable_km 路径）+ UAC1 音频（扬声器/麦克风端点，数据全部丢弃）
 #define CFG_TUD_CDC              0
-#define CFG_TUD_HID              3
+#define CFG_TUD_HID              1
 #define CFG_TUD_AUDIO            1
 #define CFG_TUD_VENDOR           0
 
