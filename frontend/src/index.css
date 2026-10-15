@@ -1,0 +1,237 @@
+/* ═══════════════════════════════════════════════════════════════
+ * 主题令牌（亮色 / 暗色两套）
+ * ═══════════════════════════════════════════════════════════════
+ * 面板与所有弹窗的配色都从这里取：JS 侧（PanelKit 的 PANEL_* 常量）拿到的是
+ * `var(--panel-xxx)`，所以在 sx / 内联样式里都能直接生效，切换主题时无需重渲染整棵树。
+ * 切换方式：<html data-theme="dark|light">（themeStore.js 负责写），`auto` 由 JS 解析成两者之一。
+ *
+ * 新增颜色时的规矩：**先在这里加一对令牌**，不要在组件里写死色值——
+ * 写死的颜色在另一种主题下不是看不见就是刺眼。 */
+:root,
+:root[data-theme='light'] {
+  --panel-ink: #1A1F26;            /* 正文 */
+  --panel-muted: #6A7480;          /* 次要说明 */
+  --panel-line: #E4E8ED;           /* 描边/分隔线 */
+  --panel-line-strong: #E4E8ED;    /* 可点按描边控件（chip 等）：亮色下与 line 相同已足够清晰 */
+  --panel-sunken: #F6F8FA;         /* 下沉底（分组标题条、底栏） */
+  --panel-surface: #FFFFFF;        /* 卡片/弹窗纸面 */
+  --panel-content: #FBFCFD;        /* 弹窗内容区、终端底 */
+  --panel-accent: #0B4FA8;         /* 选中态文字 */
+  --panel-accent-bg: #EAF2FE;      /* 选中态底 */
+  --panel-accent-bg-hover: #DCE9FC;
+  --panel-accent-line: #CFE0FA;    /* 浅蓝描边（提示条） */
+  --panel-danger: #B54708;         /* 警告/错误文字 */
+  --panel-danger-bg: #FDECEC;
+  --panel-danger-line: #F5C2C2;
+  --panel-danger-hover: #D14343;   /* 删除按钮 hover */
+  --panel-warn-bg: #FFF7E6;
+  --panel-warn-line: #F5D9A8;
+  --panel-field-line: #E4E8ED;     /* 输入框/下拉描边 */
+  --panel-field-line-hover: #C4CBD3;
+  --panel-icon: #98A2AE;           /* 行内图标默认色 */
+  --panel-icon-hover: #5A6472;
+  --panel-chevron: #C9CFD6;        /* 入口行右侧箭头 */
+  --panel-hover-bg: #F6F8FA;       /* 列表/入口 hover 底 */
+  --panel-titlebar-bg: #2B3440;    /* 面板/页面标题栏（深色条，两套主题都深） */
+  --panel-titlebar-ink: #E8ECF1;
+  --panel-backdrop: #15181D;       /* 面板背后的页面底色 */
+  --panel-scrim: rgba(26, 31, 38, .35);
+  --panel-focus-ring: #1976D2;
+  --ai-diff-add-ink: #1A7F37;      /* AI 回复里代码 diff 的新增行 */
+  --ai-diff-add-bg: rgba(0, 160, 0, .07);
+  --ai-diff-del-ink: #B6272E;
+  --ai-diff-del-bg: rgba(255, 0, 0, .06);
+}
+
+:root[data-theme='dark'] {
+  --panel-ink: #E4E9F0;
+  --panel-muted: #97A2B1;
+  --panel-line: #333B46;
+  --panel-line-strong: #4A5563;    /* 暗色下 line(#333B46) 贴着 surface(#1B222C) 几乎看不见，描边控件用这档 */
+  --panel-sunken: #222A34;
+  --panel-surface: #1B222C;
+  --panel-content: #161C24;
+  --panel-accent: #86B7FF;
+  --panel-accent-bg: #1E2C42;
+  --panel-accent-bg-hover: #26364F;
+  --panel-accent-line: #2E4463;
+  --panel-danger: #F0A176;
+  --panel-danger-bg: #3A2622;
+  --panel-danger-line: #5A3A32;
+  --panel-danger-hover: #FF8A7A;
+  --panel-warn-bg: #38301F;
+  --panel-warn-line: #574B2A;
+  --panel-field-line: #3A434F;
+  --panel-field-line-hover: #4C5665;
+  --panel-icon: #8792A0;
+  --panel-icon-hover: #C6CED9;
+  --panel-chevron: #5A6472;
+  --panel-hover-bg: rgba(255, 255, 255, .05);
+  --panel-titlebar-bg: #1F2731;
+  --panel-titlebar-ink: #E4E9F0;
+  --panel-backdrop: #0B0F14;
+  --panel-scrim: rgba(0, 0, 0, .6);
+  --panel-focus-ring: #86B7FF;
+  --ai-diff-add-ink: #6FD08C;
+  --ai-diff-add-bg: rgba(80, 220, 120, .12);
+  --ai-diff-del-ink: #FF8F8A;
+  --ai-diff-del-bg: rgba(255, 90, 90, .12);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-overflow-scrolling: touch;
+  /* 页面底：面板之外露出来的部分也跟着主题走 */
+  background: var(--panel-backdrop);
+  color: var(--panel-ink);
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* ── 文字选择策略（拖动不该把页面刷蓝）────────────────────────────
+ * 默认全站不可选，只有"内容"白名单显式放行。
+ * 为什么不写成"哪里要禁就写哪里"：拖动起手点散落在面板 / 画布浮层 / 弹窗三类容器里，
+ * 而弹窗与下拉都是 portal 到 body 的（不在面板子树里），逐个补必然漏——2026-09-27 实测：
+ * 在面板正文文字上拖一下选中 64 字、27 个高亮矩形、**覆盖 75% 视口**，且松手后不消失；
+ * 空文本也会蓝（拖到画布外时选中长度 0，但仍有 1 个矩形盖住 53% 视口）。
+ * 细节与实测数据见仓库根 DRAG_SELECTION_REPORT.md。
+ *
+ * 三条纪律（改这块前先读）：
+ *  ① 默认关写在 `body` 上（而不是 `*`）：`*` 会连 input/工具栏一起打穿，也没法用继承解释；
+ *  ② 白名单必须**排在默认关之后**，且选择器权重不低于它（`body` 是 0,0,1，元素选择器
+ *     同为 0,0,1 靠顺序取胜；带 class 的规则权重更高，可以放心）。**别把白名单单独搬到
+ *     文件更上面去** —— 顺序一乱 input 就选不中字了；
+ *  ③ 白名单里**必须有 `input/textarea/[contenteditable]`**：Chromium 下祖先 user-select:none
+ *     仍允许在输入框里拖选（实测过），但 Safari / Firefox 会真的锁死，这里不能赌。
+ */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 白名单：内容与输入。这些是用户真的要复制/编辑的东西（抄 AI 给的脚本、复制日志排查、
+   改输入框里的数值、在 Lua 编辑器里选一段代码）。新增"可复制"的区域时，给它加
+   `.selectable` 类即可，不要另写一条 user-select 规则。 */
+input,
+textarea,
+select,
+[contenteditable=""],
+[contenteditable="true"],
+.cm-editor,
+.cm-content,
+.cm-scroller,
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 拖动期总闸：由 utils/dragGuard.js 在拖动起手 / 结束时加去这个 class。
+ * `!important` 是刻意的——拖动期间**连输入框和代码编辑器都不该被刷蓝**；
+ * 这里盖过上面的白名单，静止时白名单照常生效。 */
+body.is-dragging,
+body.is-dragging * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+/* ── 隐藏滚动条（但保留滚动）─────────────────────────────────────
+ * 面板/弹窗里的内容长度一变（切换分页、展开映射卡片、日志增多…），滚动条的出现与消失会
+ * 占走/归还十几像素宽度，里面所有控件跟着整体横移一下——观感上就是"跳一下"。
+ * 这里统一不绘制滚动条：滚轮 / 触摸拖动 / 键盘 / 程序化滚动全部照常，只是不再占位、不再跳。
+ * 手机浏览器本来多用层叠式滚动条，桌面浏览器现在也不再因它移位。
+ * （不要改成 `overflow: hidden`：那会连滚动能力一起砍掉。） */
+* {
+  scrollbar-width: none;        /* Firefox / 新版 Chromium */
+  -ms-overflow-style: none;     /* 旧 Edge / IE */
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 修复老旧 Android 浏览器中 MUI Dialog 触摸滚动失效 */
+.MuiDialogContent-root {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* 通用：所有 overflow-y:auto/scroll 的容器可被触摸滚动 */
+[class*="MuiDialog"] [style*="overflow"],
+.scrollable-touch {
+  touch-action: pan-y;
+}
+
+/* 悬浮面板展开按钮的入场动画（DraggableContainer 内联 animation 引用） */
+@keyframes panel-pop-in {
+  from { transform: scale(0.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* 尊重系统「减少动态效果」：面板收展/按钮动画改为瞬间 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── 移动端动态视口适配 ────────────────────────────────────────────
+ * CSS 规范中 100vh 在移动端等于"大视口"（浏览器工具栏/系统虚拟导航键全部
+ * 收起时的高度），带虚拟按键的设备上实际可视高度更小，100vh 元素的底部会被
+ * 遮挡（Chrome 严格按规范实现；Via 等 WebView 壳的视口模型不同故无此现象）。
+ * dvh = 动态视口 = 当前真实可视高度。支持 dvh 的内核把 --vh-full 定义为
+ * 100dvh；内联样式经 var(--vh-full, 100vh) 引用，旧内核自动回退 100vh
+ * （React 内联 style 无法写 @supports，故经变量中转）。 */
+@supports (height: 100dvh) {
+    :root {
+        --vh-full: 100dvh;
+    }
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+.workspace { height: var(--vh-full, 100vh); display: flex; flex-direction: column; background: var(--panel-surface); }
+.workspace-header, .workspace-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--panel-line); flex-shrink: 0; flex-wrap: wrap; }
+.workspace-toolbar { padding: 7px 12px; background: var(--panel-content); }
+.workspace-notice { font-size: 12px; padding: 7px 18px; border-bottom: 1px solid var(--panel-line); overflow-wrap: anywhere; max-height: 100px; overflow: auto; flex-shrink: 0; }
+.workspace-body { flex: 1; min-height: 0; display: flex; }
+/* 左侧面板（仿 VS Code）：宽度优先取 --left-width（拖动分割条写入）。
+   flex-shrink:0 —— 拖动时让编辑器让位，面板本身不被压缩。 */
+.workspace-left { width: var(--left-width, 300px); min-width: 0; flex-shrink: 0; display: flex; flex-direction: column; background: var(--panel-sunken); }
+.workspace-left-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--panel-line); flex-shrink: 0; }
+.workspace-left-body { flex: 1; min-height: 0; overflow: auto; padding: 12px; display: flex; flex-direction: column; }
+.workspace-editor-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.workspace-filebar { display: flex; gap: 18px; align-items: center; padding: 10px 18px; color: var(--panel-muted); font: 11px ui-monospace, monospace; border-bottom: 1px solid var(--panel-line); }
+.workspace-filebar > :first-child { color: var(--panel-ink); }
+.workspace-code { flex: 1; min-height: 0; display: flex; }
+.workspace-code > * { flex: 1; min-height: 0; min-width: 0; }
+/* 宽度优先取 --ai-width（拖动分割条写入）；未设置时回落到响应式默认值。
+   用 CSS 变量而非内联 width，移动端媒体查询的 width:100% 才能正常覆盖。 */
+.workspace-ai { width: var(--ai-width, clamp(360px, 35vw, 600px)); min-width: 0; border-left: 1px solid var(--panel-line); flex-direction: column; }
+.workspace-footer { display: flex; justify-content: space-between; gap: 12px; padding: 6px 18px; background: var(--panel-sunken); border-top: 1px solid var(--panel-line); color: var(--panel-muted); font-size: 11px; flex-shrink: 0; }
+@media (max-width: 720px) {
+  .workspace-header { padding: 8px 12px; gap: 8px; }
+  .workspace-toolbar { gap: 6px; }
+  .workspace-toolbar > * { flex-wrap: wrap; row-gap: 6px; }
+  .workspace-filebar { padding: 8px; gap: 8px; flex-wrap: wrap; }
+  .workspace-footer { padding: 5px 8px; flex-wrap: wrap; font-size: 10px; gap: 2px; }
+  .workspace-body.ai-visible .workspace-editor-pane { display: none; }
+  .workspace-ai { width: 100%; border: 0; }
+  .workspace-ai-resizer { display: none; }   /* 窄屏 AI 面板铺满，无需拖动宽度 */
+  /* 窄屏三栏放不下：左侧面板改为铺满（与 AI 面板互斥，由 JS 在切换时保证） */
+  .workspace-body.left-visible .workspace-editor-pane { display: none; }
+  .workspace-left { width: 100%; }
+  .workspace-left-resizer { display: none; }
+}
