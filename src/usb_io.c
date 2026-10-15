@@ -49,14 +49,14 @@ void usb_io_init(void)
     proto_chan_init(&s_chan, &s_hid_tr);
     proto_register_channel(&s_chan);
     uart_proto_init();          // UART 传输平级注册（见 uart_proto.c）
-    debug_printf("[DS5C][IO] hid transport ready\n");
+    DEBUG("[DS5C][IO] hid transport ready\n");
 }
 
 void usb_io_set_instance(uint8_t instance)
 {
     s_instance = instance;
     s_chan.active = (instance != USB_IO_INST_NONE);
-    debug_printf("[DS5C][IO] hid instance=%d active=%d\n", instance, (int)s_chan.active);
+    DEBUG("[DS5C][IO] hid instance=%d active=%d\n", instance, (int)s_chan.active);
 }
 
 uint8_t usb_io_instance(void)

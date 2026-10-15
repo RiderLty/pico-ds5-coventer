@@ -37,8 +37,8 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
 - DS5 身份始终为 `054c:0ce6`，运行期切换不会改 VID/PID。
 - UAC1 扬声器/麦克风接口供主机识别和开关流，无实际音频输出。
   Feature 报告按尺寸返回零数据，震动/灯条等输出报告接收后忽略。
-- 板载 Lua 5.4.6 使用预制脚本，无运行期脚本加载；`print` 走 UART，
-  带约 10ms 步数看门狗。修改 `scripts/default.lua` 后重新构建，CMake 自动更新嵌入头文件。
+- 板载 Lua 5.4.6 使用预制脚本，无运行期脚本加载；`print` 经 DEBUG → 协议
+  PRINT 通道输出，带约 10ms 步数看门狗。修改 `scripts/default.lua` 后重新构建，CMake 自动更新嵌入头文件。
 
 手柄按键映射：A/B/X/Y → ✕/○/□/△，LB/RB → L1/R1，LT/RT → L2/R2，
 Select/Create → Create，Start → Options，LS/RS → L3/R3，Home → PS，
@@ -61,7 +61,8 @@ Lua `ability_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开�
 112 键位图报告，实际发送 NKRO。两者接口协议均为 None，不提供 USB HID Boot 协议。
 custom IO 通讯接口为 vendor usage page `0xFF00` 单接口，跑自定义分块协议
 v1（INFO 查询 / PRINT 日志流 / RESET，varint 长度 + 分块重组，无 IAD 无
-逐包 CRC）；Lua `print` 经 4KB 跨核环双发（UART + 协议）。协议命令层与
+逐包 CRC）；Lua `print` 与全部设备日志统一走 `DEBUG()` → 协议 PRINT
+通道（4KB 跨核环）。协议命令层与
 传输解耦：custom HID 与调试串口（UART0 4Mbaud，SLIP+CRC16 帧，DMA 环形
 接收）两个平级传输，命令层无感。验证页见 `tools/webhid-test.html`
 （WebHID / Web Serial 双入口）。所有追加接口均为单接口 HID、**无 IAD**——带 IAD 的
@@ -133,7 +134,8 @@ Host 引脚在 `src/main.c` 的 `pio_cfg.pin_dp` 设置。
 ### 串口与 TinyUSB 调试
 
 UART0：TX=GPIO2、RX=GPIO3、默认 **4000000 8N1**，串口适配器与固件须使用相同速率。
-默认保留启动、设备生命周期与 KM 切换日志，TinyUSB debug 关闭。需要协议日志时：
+UART 线上只有协议帧（SLIP+CRC16），设备日志经 `DEBUG()` → PRINT 通道在网页
+控制台查看，普通串口终端看到的是二进制帧字节。需要 TinyUSB 协议日志时：
 
 ```bash
 cmake -S . -B build-debug -DTUSB_DEBUG_LEVEL=2

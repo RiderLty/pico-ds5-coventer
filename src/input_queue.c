@@ -89,6 +89,6 @@ void input_queue_flush(void)
 
     // 丢弃计数在临界区外打日志：日志锁与临界区锁分离，临界区内不再取第二把锁
     if (dropped) {
-        debug_printf("[DS5C][Q] dropped %lu record(s)\n", (unsigned long)dropped);
+        DEBUG("[DS5C][Q] dropped %lu record(s)\n", (unsigned long)dropped);
     }
 }

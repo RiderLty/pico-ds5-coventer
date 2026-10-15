@@ -35,7 +35,6 @@
 #include "lua_binder.h"
 #include "lua_core.h"
 #include "usb_km.h"
-#include "usb_io.h"       // usb_log_write（print 双发：UART 照旧 + 协议环）
 #include "kbd_out.h"
 #include "kbd_hid.h"
 #include "mouse_hid.h"
@@ -182,11 +181,11 @@ void hidkit_input_touchpad(int8_t slot, const hidkit_touchpad_t *tp)
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid)
 {
     lua_binder_on_dropped(slot, vid, pid);
-    debug_printf("[DS5C][HID] dropped slot=%d %04x:%04x\n", (int)slot, vid, pid);
+    DEBUG("[DS5C][HID] dropped slot=%d %04x:%04x\n", (int)slot, vid, pid);
 }
 
 // hidkit 库内诊断（冷路径：挂载/认领判定/挤出/首次未消费）
-void hidkit_debug_printf(const char *fmt, ...)
+void hidkit_DEBUG(const char *fmt, ...)
 {
     char msg[160];
     va_list ap;
@@ -199,7 +198,7 @@ void hidkit_debug_printf(const char *fmt, ...)
     // 库内消息自带换行，剥掉后统一前缀
     while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) n--;
     msg[n] = '\0';
-    debug_printf("[DS5C][HK] %s\n", msg);
+    DEBUG("[DS5C][HK] %s\n", msg);
 }
 
 /*--------------------------------------------------------------------+
@@ -247,7 +246,7 @@ void input_app_mount(uint8_t dev_addr, uint8_t instance, uint8_t itf_num,
     s_dev[instance].proto = info.proto;
     s_dev[instance].slot = slot;
 
-    debug_printf("[DS5C][HID] mount %04x:%04x addr=%u itf=%u proto=%s slot=%d\n",
+    DEBUG("[DS5C][HID] mount %04x:%04x addr=%u itf=%u proto=%s slot=%d\n",
                  vid, pid, dev_addr, itf_num,
                  proto_str[info.proto <= HIDKIT_PROTO_GAMEPAD ? info.proto : 0],
                  (int)slot);
@@ -292,7 +291,7 @@ void input_app_task(void)
  * - hidkit 表：info() 打印设备登记表 + BTN_*、段前缀、量程常量（脚本可读地写映射）
  *--------------------------------------------------------------------*/
 
-// print(...)：参数以 tab 分隔拼接，走调试串口
+// print(...)：参数以 tab 分隔拼接，经 DEBUG → 协议 PRINT 广播到所有激活传输
 static int _lcb_print(lua_State *L) {
     int n = lua_gettop(L);
     char buf[512];
@@ -309,9 +308,7 @@ static int _lcb_print(lua_State *L) {
         lua_pop(L, 1);                              // 弹出 tostring 结果，保持栈平衡
     }
     buf[off] = '\0';
-    debug_printf("[lua] %s\n", buf);                // UART 照旧先行
-    if (off < sizeof(buf) - 1) buf[off++] = '\n';
-    usb_log_write((const uint8_t *)buf, (uint16_t)off);   // 再入 4KB 协议环（非阻塞）
+    DEBUG("[lua] %s\n", buf);
     return 0;
 }
 
@@ -330,7 +327,7 @@ static int _lcb_warn(lua_State *L) {
         lua_pop(L, 1);
     }
     buf[off] = '\0';
-    debug_printf("[lua warn] %s\n", buf);
+    DEBUG("[lua warn] %s\n", buf);
     return 0;
 }
 
@@ -341,15 +338,15 @@ static int _lcb_hidkit_info(lua_State *L) {
     uint8_t count = 0;
     for (uint8_t i = 0; i < CFG_TUH_HID; i++) {
         if (s_dev[i].dev_addr == 0) continue;
-        debug_printf("[lua] [%02d] %04x:%04x addr=%u itf=%u proto=%s slot=%d\n",
+        DEBUG("[lua] [%02d] %04x:%04x addr=%u itf=%u proto=%s slot=%d\n",
                      i, s_dev[i].vid, s_dev[i].pid, s_dev[i].dev_addr,
                      s_dev[i].itf, proto_str[s_dev[i].proto <= HIDKIT_PROTO_GAMEPAD
                                              ? s_dev[i].proto : 0],
                      (int)s_dev[i].slot);
         count++;
     }
-    if (count == 0) debug_printf("[lua] no host devices\n");
-    debug_printf("[lua] device_type=%u (0 none / 1 kb / 2 mouse)\n", hidkit_device_type());
+    if (count == 0) DEBUG("[lua] no host devices\n");
+    DEBUG("[lua] device_type=%u (0 none / 1 kb / 2 mouse)\n", hidkit_device_type());
     return 0;
 }
 
@@ -567,7 +564,7 @@ void switch_pro_log(bool error, const char *fmt, ...)
 
     while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) n--;
     msg[n] = '\0';
-    debug_printf("[DS5C][PRO]%s %s\n", error ? "!" : "", msg);
+    DEBUG("[DS5C][PRO]%s %s\n", error ? "!" : "", msg);
 }
 
 // 握手模块经 SPI 读回手柄校准后回调（读超时回落出厂/缺省校准，valid=0 也会
@@ -582,7 +579,7 @@ void switch_pro_calibration(uint8_t dev_addr, uint8_t instance,
 
     hidkit_switchpro_calib_t converted = hidkit_switch_pro_calibration(cal);
     (void)hidkit_switchpro_set_calib(slot, &converted);
-    debug_printf("[DS5C][PRO] calibration applied (valid=0x%04x)\n", cal->valid);
+    DEBUG("[DS5C][PRO] calibration applied (valid=0x%04x)\n", cal->valid);
 }
 
 /*--------------------------------------------------------------------+

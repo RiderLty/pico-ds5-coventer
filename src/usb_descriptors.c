@@ -298,10 +298,10 @@ void usb_km_apply(bool mouse, bool kbd, bool io)
     // 否则说明基线构造/回填有偏差，会静默改变主机看到的接口布局
     if (!mouse && !kbd && !io &&
         memcmp(s_cfg_desc_ram, desc_configuration, sizeof(desc_configuration)) != 0) {
-        debug_printf("[DS5C][KM] BUG: config desc RAM copy != baseline\n");
+        DEBUG("[DS5C][KM] BUG: config desc RAM copy != baseline\n");
     }
 
-    debug_printf("[DS5C][KM] config desc: %u B, %u itf, mouse=%d kbd=%d io=%d\n",
+    DEBUG("[DS5C][KM] config desc: %u B, %u itf, mouse=%d kbd=%d io=%d\n",
                  (unsigned)len, (unsigned)itf_count, mouse, kbd, io);
 }
 

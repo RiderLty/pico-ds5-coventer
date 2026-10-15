@@ -1,23 +1,20 @@
 /*
- * 串口调试输出实现。
- *
- * printf 路径：debug_printf → 自旋锁 → vsnprintf → uart_write_blocking。
- * 默认只在冷路径调用（挂载/拔出/握手状态机/错误）；TinyUSB debug 可增加高频日志。
- * 正常日志调用频率低，
- * 阻塞式写出在这里可接受，不值得引入环形缓冲/IRQ 复杂度。
+ * DEBUG 日志实现：printf 式格式化 → 协议 PRINT 消息（proto_log_write 广播
+ * 到 HID/UART 通道）。UART 上不再有裸文本，只剩协议帧（debug_write_raw）。
  */
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "pico/sync.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
+#include "pico/sync.h"
 
 #include "debug.h"
+#include "usb_io.h"
 
-// 由 SDK 分配的独占锁，兼容软件/硬件自旋锁实现
+// 由 SDK 分配的独占锁：协议帧 TX 串行化（uart_write_blocking 不并发）
 static spin_lock_t *s_lock;
 
 void debug_init(void)
@@ -36,37 +33,24 @@ void debug_init(void)
     gpio_pull_up(DEBUG_RX_PIN);
 
     // 从 free 池正式领取一把锁：spin_lock_init(固定 ID) 不入池登记，会与
-    // 后续 critical_section_init（input_queue）领到的锁撞号 —— 撞上后
-    // input_queue_flush 在临界区内打丢弃日志就自锁死整个系统。
-    // debug_init 先于一切 critical_section 调用，这里必领到锁。
+    // 后续 critical_section_init（proto 通道环）领到的锁撞号 —— 撞上后
+    // 临界区自锁死整个系统。debug_init 先于一切 critical_section 调用，
+    // 这里必领到锁。
     uint lock_num = spin_lock_claim_unused(true);
     s_lock = spin_lock_init(lock_num);
-
-    debug_puts("\n[DS5C] boot\n");
-}
-
-static void write_all(const uint8_t *s, uint32_t len)
-{
-    uint32_t save = spin_lock_blocking(s_lock);
-    uart_write_blocking(DEBUG_UART, (const uint8_t *)s, len);
-    spin_unlock(s_lock, save);
-}
-
-void debug_puts(const char *s)
-{
-    if (!s_lock || !s) return;
-    write_all((const uint8_t *)s, (uint32_t)strlen(s));
 }
 
 void debug_write_raw(const uint8_t *buf, uint32_t len)
 {
     if (!s_lock || !buf) return;
-    write_all(buf, len);
+    uint32_t save = spin_lock_blocking(s_lock);
+    uart_write_blocking(DEBUG_UART, buf, len);
+    spin_unlock(s_lock, save);
 }
 
-void debug_printf(const char *fmt, ...)
+void debug_log(const char *fmt, ...)
 {
-    if (!s_lock) return;
+    if (!s_lock) return;                 // boot 极早期（DEBUG_UART 未初始化）
 
     char msg[192];
     va_list ap;
@@ -76,28 +60,25 @@ void debug_printf(const char *fmt, ...)
     if (n <= 0) return;
     if (n > (int)sizeof(msg) - 1) n = (int)sizeof(msg) - 1;
 
-    write_all((const uint8_t *)msg, (uint32_t)n);
+    usb_log_write((const uint8_t *)msg, (uint16_t)n);   // PRINT 广播（非阻塞）
 }
 
 int tu_printf(const char *fmt, ...)
 {
-    if (!s_lock || !fmt) return 0;
-
     char msg[256];
-    int n;
     va_list ap;
     va_start(ap, fmt);
-    n = vsnprintf(msg, sizeof(msg), fmt, ap);
+    int n = vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
     if (n <= 0) return n;
     if (n >= (int)sizeof(msg)) n = (int)sizeof(msg) - 1;
 
-    // TinyUSB 自带日志已经包含 CRLF；只加前缀，不额外补换行，避免日志空行。
+    // TinyUSB 自带日志已含 CRLF；只加前缀不补换行，避免日志空行
     char line[272];
     int prefix = snprintf(line, sizeof(line), "[TUSB] ");
     if (prefix < 0) return 0;
     if (prefix + n >= (int)sizeof(line)) n = (int)sizeof(line) - prefix - 1;
     memcpy(line + prefix, msg, (size_t)n);
-    write_all((const uint8_t *)line, (uint32_t)(prefix + n));
+    usb_log_write((const uint8_t *)line, (uint16_t)(prefix + n));
     return n;
 }

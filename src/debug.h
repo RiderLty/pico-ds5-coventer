@@ -4,14 +4,20 @@
 #include <stdint.h>
 
 /*
- * 串口调试输出：uart0，TX=GPIO2 / RX=GPIO3，4000000 8N1。
+ * DEBUG — 设备日志唯一出口（printf 用法），走协议通道。
  *
- * 双核共用一个 UART：debug_printf() 内部用 SDK 自旋锁序列化，
- * 跨核并发调用不会撕裂。日志只打冷路径（挂载/拔出/握手/错误），
- * 默认不随每报文热路径刷屏；开启 TinyUSB debug 后会增加传输日志。
+ * 旧的"系统级 print"（裸文本直写 UART）已废弃：日志统一定期经
+ * debug_log() → 协议 PRINT 子命令广播到所有激活传输（custom HID +
+ * 调试串口），网页控制台/上位机统一查看。UART 线上只剩协议帧
+ * （SLIP+CRC16，见 uart_proto.c），不再有人类可读文本。
+ *
+ * proto 未初始化前（boot 极早期）的 DEBUG 调用直接丢弃。
+ * 仅持锁做环形入队，非阻塞，任何上下文（含 Lua 所在 core1）可调用。
  */
 
-// UART 实例与引脚（RX 当前未接，仅保留配置）
+#define DEBUG(fmt, ...) debug_log(fmt, ##__VA_ARGS__)
+
+// UART 实例与引脚（协议帧 TX/RX；RX 由 uart_proto.c 的 DMA 接收）
 #define DEBUG_UART       uart0
 #define DEBUG_TX_PIN     2u
 #define DEBUG_RX_PIN     3u
@@ -23,21 +29,18 @@
 #define DEBUG_BAUDRATE   4000000u
 #endif
 
-// 初始化（core0 main() 最先调用，先于 core1 启动）
+// 初始化 UART（协议帧 TX 用：引脚/波特率/锁；必须在双核启动前调用）
 void debug_init(void);
 
-// 格式化输出（线程安全）。fmt 同 printf；日志自带换行由调用方控制
-void debug_printf(const char *fmt, ...);
-
-// TinyUSB CFG_TUSB_DEBUG_PRINTF 适配函数。TinyUSB 要求 printf 兼容的 int 返回值，
-// 不能直接使用返回 void 的 debug_printf()。
-int tu_printf(const char *fmt, ...);
-
-// 原始字符串输出（线程安全）
-void debug_puts(const char *s);
-
-// 原始字节写（线程安全，持同一把锁）：协议帧与日志文本共用 UART0，
-// 用它保证帧不会被并发日志写撕裂。调用方自行组帧（SLIP 转义）。
+// 原始字节写（线程安全，持锁）：协议帧发送专用（uart_proto.c），防帧被
+// 并发写撕裂。boot 后线上不应再出现任何非帧字节。
 void debug_write_raw(const uint8_t *buf, uint32_t len);
+
+// DEBUG 的实现（一般不直接调用，用宏）
+void debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// TinyUSB CFG_TUSB_DEBUG_PRINTF 适配：路由到 DEBUG（仅在
+// -DTUSB_DEBUG_LEVEL>0 时被 TinyUSB 调用，注意高频日志会挤占协议环）
+int tu_printf(const char *fmt, ...);
 
 #endif // DS5_DEBUG_H

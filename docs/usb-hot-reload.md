@@ -108,13 +108,21 @@ CDC/NCM 类与 DS5 音频基线在 Windows 上互斥（见 `exp/cdc-serial` 分�
 - **调试串口**（`uart_proto.c`，UART0 4Mbaud，GPIO2/3 + USB-TTL）：帧 =
   `0xC0 <SLIP 转义([seq][flags][data] + CRC16-CCITT)> 0xC0`（RFC 1055）。
   RX 为 DMA 环形接收（移植 pico-hid-mapper，零 RX 中断，溢出/错误守护 +
-  50ms 半帧超时）；TX 持 debug 锁与日志文本共写 UART——日志为 ASCII，与
-  帧混流互不干扰（解码器按 0xC0 重同步，垃圾帧被 CRC 淘汰）
+  50ms 半帧超时）；TX 持 debug 锁与日志共写 UART
 
 路由：PRINT 广播到所有激活传输；请求应答只回请求方传输。网页
 `tools/webhid-test.html` 的 `PicoIO` 消息层对两者无感，`Transport` 抽象
 （HidTransport / SerialTransport）各自处理 seq 与帧封装；串口连接默认
 4000000（适配器须支持，可改）。
+
+### 日志路径（DEBUG 统一）
+
+设备日志唯一出口是 `DEBUG(fmt, ...)`（printf 用法，src/debug.h）：格式化后
+作为 PRINT 子命令经通道核心广播到所有激活传输，网页控制台/上位机统一查看。
+旧的"系统级 print"（裸文本直写 UART）已删除——UART 线上只剩协议帧，
+普通串口终端看到的是二进制帧字节。Lua `print` 经 DEBUG 接入（`[lua]` 前缀）。
+proto 通道就绪前的 boot 极早期日志直接丢弃。TinyUSB debug 日志
+（`-DTUSB_DEBUG_LEVEL`）经 `tu_printf` 同样路由到 DEBUG。
 
 ## 主线默认行为
 
@@ -122,12 +130,13 @@ CDC/NCM 类与 DS5 音频基线在 Windows 上互斥（见 `exp/cdc-serial` 分�
 - 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `ability_enable(true, true, true)`。
   计时从 Lua tick 启动开始，不从主机首次挂载开始；主机晚连接时可能直接看到键鼠配置。
 - `USB_KM_BOOT`、`USB_KM_HOT_TEST` 和首次挂载后 15 秒等待仅用于故障隔离，已删除。
-- TinyUSB 默认 debug=0；保留 UART 生命周期与简短 KM 状态日志。
+- TinyUSB 默认 debug=0；设备日志统一走 DEBUG → PRINT 通道。
 - 关闭键盘时清按键状态，关闭鼠标时清队列，Lua 请求关闭鼠标也会清按键掩码。
   未启用接口的输出不转发，切换期间输入不保证逐事件重放。
 
 ## 日志与排查
 
+用网页控制台连接 HID 或串口查看 DEBUG 日志（PRINT 消息，绿色 Pico 行）。
 正常请求启用后应看到以下关键日志（启动时也有 `queues initialized`）：
 
 ```text
@@ -147,8 +156,8 @@ cmake -S . -B build-debug -DTUSB_DEBUG_LEVEL=2
 cmake --build build-debug -j8
 ```
 
-日志走 UART0 GPIO2 TX / GPIO3 RX，默认 4000000 8N1；必要时加
-`-DDEBUG_BAUDRATE=115200` 并同步串口设置。级别 2 会输出每个端点传输，
+串口连接走 UART0 GPIO2 TX / GPIO3 RX，默认 4000000 8N1；必要时加
+`-DDEBUG_BAUDRATE=115200` 并同步网页波特率。级别 2 会输出每个端点传输，
 可能大量刷屏并影响时序。定位完毕用 `-DTUSB_DEBUG_LEVEL=0` 重新构建。
 
 ## 验证记录

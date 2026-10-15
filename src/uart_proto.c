@@ -261,7 +261,7 @@ void uart_proto_init(void)
     uart_set_irqs_enabled(DEBUG_UART, false, false);
     irq_set_enabled(UART_IRQ_NUM(DEBUG_UART), false);
 
-    debug_printf("[DS5C][IO] uart transport ready (dma rx)\n");
+    DEBUG("[DS5C][IO] uart transport ready (dma rx)\n");
 }
 
 uint32_t uart_proto_drops(void)

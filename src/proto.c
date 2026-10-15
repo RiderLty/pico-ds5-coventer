@@ -137,7 +137,7 @@ static void chan_commit(proto_chan_t *ch, uint16_t n)
 static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
                           const uint8_t *body, uint16_t len)
 {
-    debug_printf("[DS5C][IO] dispatch(%s): cmd=0x%02x msgid=%u len=%u\n",
+    DEBUG("[DS5C][IO] dispatch(%s): cmd=0x%02x msgid=%u len=%u\n",
                  ch->tr->name, cmd, msgid, len);
     (void)body;
     (void)len;
@@ -165,10 +165,10 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
     }
     case PROTO_CMD_RESET:
         ch->rx_active = false;
-        debug_printf("[DS5C][IO] session reset via %s\n", ch->tr->name);
+        DEBUG("[DS5C][IO] session reset via %s\n", ch->tr->name);
         break;
     default:
-        debug_printf("[DS5C][IO] unknown cmd 0x%02x via %s\n", cmd, ch->tr->name);
+        DEBUG("[DS5C][IO] unknown cmd 0x%02x via %s\n", cmd, ch->tr->name);
         break;
     }
 }
@@ -272,7 +272,7 @@ void proto_chan_task(proto_chan_t *ch)
 void proto_init(void)
 {
     critical_section_init_with_lock_num(&s_cs, next_striped_spin_lock_num());
-    debug_printf("[DS5C][IO] proto core initialized\n");
+    DEBUG("[DS5C][IO] proto core initialized\n");
 }
 
 void proto_chan_init(proto_chan_t *ch, const proto_transport_t *tr)

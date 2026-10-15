@@ -44,7 +44,7 @@ int _link(const char *old, const char *new) {
 // lua_core 的 debugf 消息不带换行，这里补上
 void lua_core_debug_cb(const char *msg)
 {
-  debug_printf("[DS5C]%s\n", msg);
+  DEBUG("[DS5C]%s\n", msg);
 }
 
 // core1: 处理 USB Host 事件
@@ -68,9 +68,9 @@ void core1_main(void) {
   // core1 同线程 —— 与 mapper 的 engine 线程模型一致）。失败不致命：
   // C 默认映射照常，仅无 Lua 事件。
   if (!lua_binder_init(LUA_DEFAULT_SCRIPT, sizeof(LUA_DEFAULT_SCRIPT) - 1)) {
-    debug_printf("[DS5C][LUA] init failed: %s\n", lua_binder_last_error());
+    DEBUG("[DS5C][LUA] init failed: %s\n", lua_binder_last_error());
   } else {
-    debug_printf("[DS5C][LUA] script loaded\n");
+    DEBUG("[DS5C][LUA] script loaded\n");
   }
 
   // 在 core1 上初始化 PIO-USB Host 栈 (roothub port1)
@@ -80,7 +80,7 @@ void core1_main(void) {
   };
   tusb_init(1, &host_init);
 
-  debug_printf("[DS5C] core1 host ready\n");
+  DEBUG("[DS5C] core1 host ready\n");
 
   while (true) {
     tuh_task();
@@ -130,7 +130,7 @@ int main(void) {
   tusb_init(0, &dev_init);
   ds5_pad_init();
 
-  debug_printf("[DS5C] core0 device ready (PIO-USB @ GPIO12/13, tusb_debug=%d)\n",
+  DEBUG("[DS5C] core0 device ready (PIO-USB @ GPIO12/13, tusb_debug=%d)\n",
                CFG_TUSB_DEBUG);
 
   uint8_t report[DS_REPORT_LEN];
@@ -160,25 +160,25 @@ int main(void) {
 
 void tud_mount_cb(void)
 {
-  debug_printf("[DS5C][USB] MOUNTED: cfg=%d speed=%d hid(kbd=%d mouse=%d)\n",
+  DEBUG("[DS5C][USB] MOUNTED: cfg=%d speed=%d hid(kbd=%d mouse=%d)\n",
                tud_mounted(), (int)tud_speed_get(),
                usb_km_kbd_enabled(), usb_km_mouse_enabled());
 }
 
 void tud_umount_cb(void)
 {
-  debug_printf("[DS5C][USB] UMOUNTED: inited=%d mounted=%d\n",
+  DEBUG("[DS5C][USB] UMOUNTED: inited=%d mounted=%d\n",
                tud_inited(), tud_mounted());
 }
 
 void tud_suspend_cb(bool remote_wakeup_en)
 {
-  debug_printf("[DS5C][USB] SUSPEND: remote_wakeup=%d\n", remote_wakeup_en);
+  DEBUG("[DS5C][USB] SUSPEND: remote_wakeup=%d\n", remote_wakeup_en);
 }
 
 void tud_resume_cb(void)
 {
-  debug_printf("[DS5C][USB] RESUME\n");
+  DEBUG("[DS5C][USB] RESUME\n");
 }
 
 //--------------------------------------------------------------------
@@ -212,7 +212,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance,
 
   if ( !tuh_hid_receive_report(dev_addr, instance) )
   {
-    debug_printf("[DS5C][HID] cannot request report\n");
+    DEBUG("[DS5C][HID] cannot request report\n");
   }
 }
 
@@ -238,6 +238,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance,
   // 继续请求接收下一份报告
   if ( !tuh_hid_receive_report(dev_addr, instance) )
   {
-    debug_printf("[DS5C][HID] cannot request report\n");
+    DEBUG("[DS5C][HID] cannot request report\n");
   }
 }

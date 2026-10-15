@@ -45,7 +45,7 @@ void usb_km_init(void)
     usb_io_init();
     s_applied_mask = 0u;
     __atomic_store_n(&s_req_mask, 0u, __ATOMIC_RELAXED);
-    debug_printf("[DS5C][KM] queues initialized\n");
+    DEBUG("[DS5C][KM] queues initialized\n");
 }
 
 void usb_km_request(bool kbd, bool mouse, bool io)
@@ -82,7 +82,7 @@ void usb_km_task(void)
     bool io   = (req & USB_KM_BIT_IO) != 0u;
 
     bool was_inited = tud_inited();
-    debug_printf("[DS5C][KM] reload: old(kbd=%d mouse=%d io=%d) -> "
+    DEBUG("[DS5C][KM] reload: old(kbd=%d mouse=%d io=%d) -> "
                  "new(kbd=%d mouse=%d io=%d), inited=%d mounted=%d\n",
                  (int)usb_km_kbd_enabled(), (int)usb_km_mouse_enabled(),
                  (int)usb_km_io_enabled(),
@@ -106,7 +106,7 @@ void usb_km_task(void)
 
     if (was_inited) {
         tud_connect();
-        debug_printf("[DS5C][KM] reconnect requested; waiting for host enumeration\n");
+        DEBUG("[DS5C][KM] reconnect requested; waiting for host enumeration\n");
     }
 }
 

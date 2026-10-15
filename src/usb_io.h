@@ -28,7 +28,7 @@ void usb_io_set_instance(uint8_t instance);
 uint8_t usb_io_instance(void);
 bool usb_io_enabled(void);
 
-// Lua print 出口（core1，非阻塞）：PRINT 消息广播到所有激活传输
+// DEBUG 日志的 PRINT 入口（debug_log 调用）：广播到所有激活传输
 void usb_log_write(const uint8_t *data, uint16_t len);
 
 // OUT 端点收到主机报文（payload，已剥 Report ID）；未启用时丢弃
