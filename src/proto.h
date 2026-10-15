@@ -30,6 +30,9 @@
 #define PROTO_CMD_INFO    0x01
 #define PROTO_CMD_PRINT   0x02
 #define PROTO_CMD_RESET   0x03
+// 临时压测命令（验证稳定性后整段删除）：body = [随机数据][CRC32 LE]，
+// 收完校验后设备回等长随机数据 + 自身 CRC32
+#define PROTO_CMD_TEST    0x04
 
 #define PROTO_F_START     0x01
 #define PROTO_F_END       0x02
@@ -63,16 +66,27 @@ struct proto_chan {
     uint16_t head, tail, used;
     uint32_t drops;
 
-    // TX 单飞状态
+    // TX 单飞状态（长度/偏移用 32 位：流式压测最大 2MB，16 位会截断回绕）
     bool     tx_active;
     uint8_t  tx_cmd;
-    uint16_t tx_msgid, tx_len, tx_off;
+    uint16_t tx_msgid;
+    uint32_t tx_len, tx_off;
 
     // RX 重组
     bool     rx_active;
     uint8_t  rx_cmd;
-    uint16_t rx_msgid, rx_total, rx_off;
+    uint16_t rx_msgid;
+    uint32_t rx_total, rx_off;
     uint8_t  rx_buf[PROTO_RX_REASM_MAX];
+
+    // 流式测试（临时，TEST 命令专用；绕过重组缓冲，任意长度零拷贝）
+    bool     stream_rx;
+    uint16_t rx_pend_n;            // 尾部 4B 预扣（CRC32 trailer 不进流式 CRC）
+    uint8_t  rx_pend[4];
+    uint32_t rxcrc;                // zlib CRC32 累计
+    bool     stream_tx;
+    uint32_t tx_total;             // 流式发送总长（payload + 4B CRC32）
+    uint32_t txcrc, rng;           // TX 生成器：CRC 累计 + xorshift32 状态
 };
 
 // 初始化通道核心（共享临界区；必须在双核启动前调用）

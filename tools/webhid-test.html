@@ -54,6 +54,13 @@
   .err   .who { background: #3a2226; color: var(--err); }
   .sys .txt, .err .txt { color: var(--dim); font-size: 12.5px; }
   .err .txt { color: var(--err); }
+  #insecure {
+    display: none;
+    background: #3a2226; border: 1px solid var(--err); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.7;
+  }
+  #insecure b { color: var(--err); }
+  #insecure code { font-family: var(--mono); color: var(--text); }
   h2 { font-size: 14px; margin: 0 0 12px; color: var(--dim); font-weight: 600; }
   .stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; color: var(--dim); }
   .stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
@@ -61,6 +68,12 @@
 </head>
 <body>
 <div class="wrap">
+  <div id="insecure">
+    <b>当前页面不是 secure context</b> —— WebHID / Web Serial 无法使用。可选：
+    ① 直接双击本文件（file:// 即 secure）；② 用 <b>http://localhost</b> 访问本页；
+    ③ 局域网 IP 访问请用 <code>python3 tools/serve_https.py</code>（自签 HTTPS，
+    浏览器警告点"继续前往"）。
+  </div>
   <h1>Pico IO — 传输抽象控制台</h1>
   <div class="sub">
     同一套协议 v1（<b>INFO</b> / <b>PRINT</b> / <b>RESET</b>）跑在两个平级传输上：
@@ -83,6 +96,13 @@
     <div class="row">
       <button id="btnInfo" disabled>INFO 查询</button>
       <button id="btnClear" class="ghost">清空日志</button>
+    </div>
+    <h2 style="margin-top:14px">流式压测（临时验证用）——发 N 随机字节，设备收完校验后回发等长随机数据</h2>
+    <div class="row">
+      <button id="btnTest512k" class="ghost" disabled>512K</button>
+      <button id="btnTest1m" class="ghost" disabled>1M</button>
+      <button id="btnTest2m" class="ghost" disabled>2M</button>
+      <span class="sub" style="margin:0">HID 2M 双向约 1-2 分钟，串口约 10-20s</span>
     </div>
   </div>
 
@@ -136,6 +156,18 @@ function crc16(bytes) {
   return crc;
 }
 
+// zlib CRC32（与设备端 test_crc 一致）
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc ^= bytes[i];
+    for (let b = 0; b < 8; b++) {
+      crc = (crc & 1) ? ((crc >>> 1) ^ 0xEDB88320) : (crc >>> 1);
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
 // ── HID 传输：块 → 满 63B 报文（seq 前缀 + 补零）；IN 报文剥 seq ────
 class HidTransport {
   constructor(onchunk, onclose) {
@@ -166,7 +198,7 @@ class HidTransport {
     const full = new Uint8Array(CHUNK_MAX);
     full[0] = this.seq++ & 0xFF;
     full.set(chunk, 1);
-    console.info(`[picoio/hid] TX ${hex(full)}`);
+    console.info(`[picoio/hid] TX #${this.seq} ${full.length}B`);
     await this.device.sendReport(2 /* REPORT_ID_OUT */, full);
   }
 
@@ -175,7 +207,6 @@ class HidTransport {
     // Chrome 的 e.data 不含 Report ID：raw = [seq][flags][data...]
     const raw = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
     if (raw.length < 2) return;
-    console.info(`[picoio/hid] IN ${raw.length}B ${hex(raw)}`);
     this.onchunk(raw.subarray(1));    // 剥 seq → [flags][data...]
   }
 }
@@ -226,7 +257,7 @@ class SerialTransport {
       else frame.push(b);
     }
     frame.push(SLIP_END);
-    console.info(`[picoio/uart] TX ${frame.length}B ${hex(frame)}`);
+    console.info(`[picoio/uart] TX #${this.seq} ${frame.length}B`);
     await this.writer.write(Uint8Array.from(frame));
   }
 
@@ -276,7 +307,6 @@ class SerialTransport {
       console.info(`[picoio/uart] RX CRC 失败，丢弃 ${len}B`);
       return;
     }
-    console.info(`[picoio/uart] RX ${len}B ${hex(this.buf)}`);
     this.onchunk(Uint8Array.from(body.slice(1)));   // 剥 seq → [flags][data...]
   }
 }
@@ -307,7 +337,8 @@ class PicoIO {
     const header = [cmd, msgid & 0xFF, (msgid >> 8) & 0xFF, ...varintPut(body.length)];
     let sent = 0;
     for (;;) {
-      const cap = CHUNK_MAX - 1 - (sent === 0 ? header.length : 0);
+      // 块 = [flags][header][data] ≤ CHUNK_MAX-1（HID 适配器还要前置 1B seq）
+      const cap = CHUNK_MAX - 2 - (sent === 0 ? header.length : 0);
       const n = Math.min(body.length - sent, cap);
       const chunk = [];
       const flags = (sent === 0 ? F_START : 0) | (sent + n >= body.length ? F_END : 0);
@@ -418,6 +449,9 @@ function setConnected(on, name) {
   $("btnConnectSerial").disabled = on;
   $("btnDisconnect").disabled = !on;
   $("btnInfo").disabled = !on;
+  $("btnTest512k").disabled = !on;
+  $("btnTest1m").disabled = !on;
+  $("btnTest2m").disabled = !on;
   $("badge").textContent = on ? `已连接（${name}）` : "未连接";
   $("badge").classList.toggle("on", on);
 }
@@ -429,6 +463,51 @@ async function doInfo() {
   } catch (e) {
     err(e.message);
   }
+}
+
+// 流式压测（临时）：发 N 随机字节（尾 4B = zlib CRC32），设备校验后回发
+// 等长随机数据（同样带 CRC32），双向验证完整性
+const CMD_TEST = 0x04;
+
+async function runTest(size) {
+  if (!io || !io.transport) return;
+  setTestButtons(true);
+  try {
+    const body = new Uint8Array(size);
+    for (let off = 0; off < size; off += 65536) {
+      // getRandomValues 单次上限 64KB，分块填充
+      crypto.getRandomValues(body.subarray(off, Math.min(off + 65536, size)));
+    }
+    const crc = crc32(body.subarray(0, size - 4));
+    body[size - 4] = crc & 0xFF;
+    body[size - 3] = (crc >>> 8) & 0xFF;
+    body[size - 2] = (crc >>> 16) & 0xFF;
+    body[size - 1] = (crc >>> 24) & 0xFF;
+
+    sys(`压测开始：${size}B 上行中...`);
+    const t0 = performance.now();
+    const timeout = Math.ceil((size * 2 / 50000 + 30) * 1000);
+    const resp = await io.request(CMD_TEST, body, timeout);
+    const dur = (performance.now() - t0) / 1000;
+
+    if (resp.length !== size) throw new Error(`回包长度 ${resp.length} ≠ ${size}`);
+    const crcRecv = resp[size - 4] | (resp[size - 3] << 8) |
+                    (resp[size - 2] << 16) | (resp[size - 1] << 24);
+    if (crc32(resp.subarray(0, size - 4)) !== crcRecv) throw new Error("回包 CRC32 不匹配");
+
+    const mbps = ((size * 2) / dur / 1024 / 1024).toFixed(2);
+    const echoCrc = crc32(resp.subarray(0, size - 4));
+    sys(`压测 OK：${size}B 双向 ${dur.toFixed(1)}s（${mbps} MB/s）` +
+        ` 上行校验和 0x${crc.toString(16).padStart(8, "0")}` +
+        ` 回包校验和 0x${echoCrc.toString(16).padStart(8, "0")}`);
+  } catch (e) {
+    err(`压测失败（${size}B）：` + e.message);
+  }
+  setTestButtons(false);
+}
+
+function setTestButtons(disabled) {
+  for (const id of ["btnTest512k", "btnTest1m", "btnTest2m"]) $(id).disabled = disabled;
 }
 
 async function connectHid() {
@@ -484,11 +563,18 @@ $("btnConnectSerial").onclick = connectSerial;
 $("btnDisconnect").onclick = disconnect;
 $("btnInfo").onclick = doInfo;
 $("btnClear").onclick = () => { logEl.innerHTML = ""; };
+$("btnTest512k").onclick = () => runTest(512 * 1024);
+$("btnTest1m").onclick = () => runTest(1024 * 1024);
+$("btnTest2m").onclick = () => runTest(2 * 1024 * 1024);
 
 if (!("hid" in navigator) && !("serial" in navigator)) {
   err("当前浏览器不支持 WebHID / Web Serial —— 请用 Chrome / Edge 顶层打开本页");
 } else {
   sys("就绪。选择「连接 HID」（设备 USB）或「连接串口」（GPIO2/3 + USB-TTL）");
+}
+if (!window.isSecureContext) {
+  $("insecure").style.display = "block";
+  err("非 secure context：请按页面顶部提示换 localhost / file:// / 自签 HTTPS");
 }
 stats();
 </script>

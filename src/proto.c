@@ -44,6 +44,139 @@ static const uint8_t *varint_get(const uint8_t *p, const uint8_t *end, uint32_t 
 }
 
 // ---------------------------------------------------------------------------
+// 流式压测（临时，PROTO_CMD_TEST；验证稳定性后整段删除）
+// 消息体 = [随机数据...][CRC32 LE]（zlib），收发两侧同构。RX 绕过重组
+// 缓冲逐字节喂 CRC（尾 4B 预扣作校验码），TX 用 xorshift32 现场生成。
+// ---------------------------------------------------------------------------
+
+#define CRC32_INIT 0xFFFFFFFFu
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return crc;
+}
+
+// 逐字节入流：保持最后 4B 在 pend（不进 CRC），其余喂 CRC
+static void test_rx_feed(proto_chan_t *ch, const uint8_t *data, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++) {
+        if (ch->rx_pend_n == 4u) {
+            ch->rxcrc = crc32_update(ch->rxcrc, ch->rx_pend, 1u);
+            memmove(ch->rx_pend, ch->rx_pend + 1, 3u);
+            ch->rx_pend_n = 3u;
+        }
+        ch->rx_pend[ch->rx_pend_n++] = data[i];
+        ch->rx_off++;
+    }
+}
+
+static void test_tx_start(proto_chan_t *ch)
+{
+    ch->stream_tx = true;
+    ch->tx_total  = ch->rx_total;
+    ch->tx_cmd    = ch->rx_cmd;      // 回显：cmd 与 msg_id 必须与请求一致，
+    ch->tx_msgid  = ch->rx_msgid;    // 否则上位机 pending 匹配不上 → 超时
+    ch->txcrc = CRC32_INIT;
+    ch->rng = (uint32_t)(time_us_64()) | 1u;
+    ch->tx_off = 0;
+}
+
+static void test_rx_end(proto_chan_t *ch)
+{
+    ch->stream_rx = false;
+
+    if (ch->rx_off != ch->rx_total || ch->rx_pend_n != 4u) {
+        DEBUG("[test] rx FAIL: got %lu/%lu B\n",
+              (unsigned long)ch->rx_off, (unsigned long)ch->rx_total);
+        return;
+    }
+    uint32_t crc_recv = (uint32_t)ch->rx_pend[0] | ((uint32_t)ch->rx_pend[1] << 8) |
+                        ((uint32_t)ch->rx_pend[2] << 16) | ((uint32_t)ch->rx_pend[3] << 24);
+    if ((ch->rxcrc ^ 0xFFFFFFFFu) != crc_recv) {
+        DEBUG("[test] rx FAIL: crc %08lx != %08lx\n",
+              (unsigned long)(ch->rxcrc ^ 0xFFFFFFFFu), (unsigned long)crc_recv);
+        return;
+    }
+
+    DEBUG("[test] rx ok %lu B via %s, echoing...\n",
+          (unsigned long)ch->rx_total, ch->tr->name);
+    test_tx_start(ch);   // 回发等长随机数据（同通道，msg_id 回显）
+}
+
+// 生成随机数据并累计 CRC；返回写入字节数
+static uint16_t test_gen(proto_chan_t *ch, uint8_t *dst, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i += 4) {
+        uint32_t x = ch->rng;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        ch->rng = x;
+        uint16_t k = (uint16_t)(len - i);
+        if (k > 4u) k = 4u;
+        memcpy(dst + i, &x, k);
+    }
+    ch->txcrc = crc32_update(ch->txcrc, dst, len);
+    return len;
+}
+
+// TX 流式块：随机数据填满块，末块追加 4B CRC32 trailer
+static bool test_tx_chunk(proto_chan_t *ch)
+{
+    if (!ch->tr->ready(ch)) return false;
+
+    uint8_t chunk[1u + PROTO_CHUNK_DATA_MAX];
+    uint16_t pos = 0;
+    chunk[pos++] = 0;
+
+    bool first = (ch->tx_off == 0);
+    if (first) {
+        chunk[pos++] = ch->tx_cmd;
+        chunk[pos++] = (uint8_t)(ch->tx_msgid & 0xFFu);
+        chunk[pos++] = (uint8_t)(ch->tx_msgid >> 8);
+        pos = (uint16_t)(varint_put(chunk + pos, ch->tx_total) - chunk);
+    }
+
+    uint32_t payload_left = (uint32_t)(ch->tx_total - 4u - ch->tx_off);
+    uint16_t cap = (uint16_t)((1u + PROTO_CHUNK_DATA_MAX) - pos);
+    uint16_t n = (payload_left > cap) ? cap : (uint16_t)payload_left;
+
+    bool last;
+    if (payload_left == 0u) {
+        n = 0;                                   // 纯 trailer 块
+        last = true;
+    } else {
+        test_gen(ch, chunk + pos, n);
+        pos = (uint16_t)(pos + n);
+        ch->tx_off += n;
+        last = (ch->tx_off == ch->tx_total - 4u) &&
+               ((uint16_t)(pos + 4u) <= (1u + PROTO_CHUNK_DATA_MAX));
+    }
+    if (last) {
+        uint32_t crc = ch->txcrc ^ 0xFFFFFFFFu;
+        chunk[pos++] = (uint8_t)crc;
+        chunk[pos++] = (uint8_t)(crc >> 8);
+        chunk[pos++] = (uint8_t)(crc >> 16);
+        chunk[pos++] = (uint8_t)(crc >> 24);
+    }
+    chunk[0] = (uint8_t)((first ? PROTO_F_START : 0u) | (last ? PROTO_F_END : 0u));
+
+    if (ch->tr->send_chunk(ch, chunk, pos)) {
+        if (last) {
+            ch->stream_tx = false;
+            DEBUG("[test] tx ok %lu B via %s\n",
+                  (unsigned long)ch->tx_total, ch->tr->name);
+        }
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // 消息环（变长 entry [cmd][msgid:2][len:2][data]，双段回绕拷贝；持锁调用）
 // ---------------------------------------------------------------------------
 
@@ -187,6 +320,17 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
 
     if (flags & PROTO_F_RESET) {
         ch->rx_active = false;
+        ch->stream_rx = false;
+        return;
+    }
+
+    // 流式测试收包中：喂 CRC，END 出结果。HID 适配器的块恒满长（补零），
+    // 超出 total 的补零不进流
+    if (ch->stream_rx) {
+        uint32_t space = ch->rx_total - ch->rx_off;
+        uint16_t feed = (dlen > space) ? (uint16_t)space : dlen;
+        test_rx_feed(ch, data, feed);
+        if (flags & PROTO_F_END) test_rx_end(ch);
         return;
     }
 
@@ -194,15 +338,31 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
         if (dlen < 3u) return;
         uint32_t total = 0;
         const uint8_t *q = varint_get(data + 3, data + dlen, &total);
-        if (!q || total > PROTO_RX_REASM_MAX) {
+        if (!q) {
             ch->rx_active = false;
             return;
         }
         ch->rx_active = true;
         ch->rx_cmd    = data[0];
         ch->rx_msgid  = (uint16_t)(data[1] | (data[2] << 8));
-        ch->rx_total  = (uint16_t)total;
-        ch->rx_off    = (uint16_t)(dlen - (uint16_t)(q - data));
+        ch->rx_total  = total;
+        ch->rx_off    = 0;
+
+        if (ch->rx_cmd == PROTO_CMD_TEST) {
+            // 流式模式（任意长度，绕过重组缓冲）
+            ch->stream_rx = true;
+            ch->rx_pend_n = 0u;
+            ch->rxcrc = CRC32_INIT;
+            test_rx_feed(ch, q, (uint16_t)(dlen - (uint16_t)(q - data)));
+            if (flags & PROTO_F_END) test_rx_end(ch);
+            return;
+        }
+
+        if (total > PROTO_RX_REASM_MAX) {
+            ch->rx_active = false;
+            return;
+        }
+        ch->rx_off = (uint16_t)(dlen - (uint16_t)(q - data));
         if (ch->rx_off > ch->rx_total) ch->rx_off = ch->rx_total;   // 传输侧补零裁剪
         memcpy(ch->rx_buf, q, ch->rx_off);
         if (flags & PROTO_F_END) {
@@ -214,7 +374,7 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
 
     if (!ch->rx_active) return;   // CONT/END 无在途消息，丢弃
 
-    uint16_t space = (uint16_t)(ch->rx_total - ch->rx_off);
+    uint32_t space = ch->rx_total - ch->rx_off;
     if (dlen > space) dlen = space;
     memcpy(ch->rx_buf + ch->rx_off, data, dlen);
     ch->rx_off = (uint16_t)(ch->rx_off + dlen);
@@ -232,6 +392,12 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
 void proto_chan_task(proto_chan_t *ch)
 {
     if (!ch->active) return;
+
+    // 流式压测发送优先（占用通道期间环内消息排队等待）
+    if (ch->stream_tx) {
+        test_tx_chunk(ch);
+        return;
+    }
 
     if (!ch->tx_active && !chan_pop_header(ch)) return;
     if (!ch->tr->ready(ch)) return;
@@ -255,12 +421,12 @@ void proto_chan_task(proto_chan_t *ch)
     chan_read_data(ch, ch->tx_off, chunk + pos, n);
     pos = (uint16_t)(pos + n);
 
-    bool last = (uint16_t)(ch->tx_off + n) == ch->tx_len;
+    bool last = (ch->tx_off + n) == ch->tx_len;
     chunk[0] = (uint8_t)((first ? PROTO_F_START : 0u) | (last ? PROTO_F_END : 0u));
 
     if (ch->tr->send_chunk(ch, chunk, pos)) {
         chan_commit(ch, n);
-        ch->tx_off = (uint16_t)(ch->tx_off + n);
+        ch->tx_off += n;
         if (last) ch->tx_active = false;
     }
 }
