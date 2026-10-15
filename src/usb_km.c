@@ -42,6 +42,7 @@ void usb_km_init(void)
 {
     kbd_out_init();
     mouse_queue_init();
+    usb_io_init();
     s_applied_mask = 0u;
     __atomic_store_n(&s_req_mask, 0u, __ATOMIC_RELAXED);
     debug_printf("[DS5C][KM] queues initialized\n");

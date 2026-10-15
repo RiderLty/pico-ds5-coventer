@@ -35,6 +35,7 @@
 #include "lua_binder.h"
 #include "lua_core.h"
 #include "usb_km.h"
+#include "usb_io.h"       // usb_log_write（print 双发：UART 照旧 + 协议环）
 #include "kbd_out.h"
 #include "kbd_hid.h"
 #include "mouse_hid.h"
@@ -294,21 +295,23 @@ void input_app_task(void)
 // print(...)：参数以 tab 分隔拼接，走调试串口
 static int _lcb_print(lua_State *L) {
     int n = lua_gettop(L);
-    char buf[200];
+    char buf[512];
     size_t off = 0;
-    for (int i = 1; i <= n && off < sizeof(buf) - 1; i++) {
+    for (int i = 1; i <= n && off < sizeof(buf) - 2; i++) {
         if (i > 1) buf[off++] = '\t';
-        if (off >= sizeof(buf) - 1) break;
+        if (off >= sizeof(buf) - 2) break;
         size_t l;
         const char *s = luaL_tolstring(L, i, &l);   // 尊重 __tostring；结果压栈
-        size_t space = sizeof(buf) - 1 - off;
+        size_t space = sizeof(buf) - 2 - off;
         if (l > space) l = space;
         memcpy(buf + off, s, l);
         off += l;
         lua_pop(L, 1);                              // 弹出 tostring 结果，保持栈平衡
     }
     buf[off] = '\0';
-    debug_printf("[lua] %s\n", buf);
+    debug_printf("[lua] %s\n", buf);                // UART 照旧先行
+    if (off < sizeof(buf) - 1) buf[off++] = '\n';
+    usb_log_write((const uint8_t *)buf, (uint16_t)off);   // 再入 4KB 协议环（非阻塞）
     return 0;
 }
 

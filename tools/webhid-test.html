@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pico IO — WebHID 文本控制台</title>
+<title>Pico IO — WebHID 协议控制台</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --line: #2a2f3a;
@@ -31,45 +31,37 @@
   }
   button:disabled { background: #3a4152; color: #7b849a; cursor: not-allowed; }
   button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
-  input[type="text"], input[type="number"] {
-    background: #0c0e12; border: 1px solid var(--line); color: var(--text);
-    border-radius: 8px; padding: 8px 12px; font-size: 14px;
-  }
-  input[type="text"] { flex: 1; min-width: 240px; }
-  input[type="number"] { width: 90px; font-family: var(--mono); }
-  .stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; color: var(--dim); }
-  .stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
-  #log {
-    background: #0c0e12; border: 1px solid var(--line); border-radius: 8px;
-    height: 380px; overflow-y: auto; padding: 12px 14px;
-  }
-  .msg { margin: 6px 0; display: flex; gap: 10px; align-items: baseline; }
-  .msg .who { flex: none; font-size: 12px; padding: 1px 8px; border-radius: 12px; }
-  .msg .txt { word-break: break-all; font-family: var(--mono); font-size: 13px; }
-  .me .who { background: #223252; color: var(--acc); }
-  .pico .who { background: #1d3a2e; color: var(--ok); }
-  .bad .who { background: #3a2226; color: var(--err); }
-  .sys .who { background: transparent; color: var(--dim); }
-  .sys .txt { color: var(--dim); font-size: 12.5px; }
-  .ts { flex: none; color: #566; font-size: 11px; font-family: var(--mono); }
   .badge {
     display: inline-block; padding: 2px 10px; border-radius: 20px;
     font-size: 12px; border: 1px solid var(--line); color: var(--dim);
   }
   .badge.on { border-color: var(--ok); color: var(--ok); }
-  label { font-size: 13px; color: var(--dim); }
+  #log {
+    background: #0c0e12; border: 1px solid var(--line); border-radius: 8px;
+    height: 420px; overflow-y: auto; padding: 12px 14px;
+  }
+  .msg { margin: 5px 0; display: flex; gap: 10px; align-items: baseline; }
+  .msg .who { flex: none; font-size: 12px; padding: 1px 8px; border-radius: 12px; }
+  .msg .txt { word-break: break-all; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; }
+  .print .who { background: #1d3a2e; color: var(--ok); }
+  .info  .who { background: #223252; color: var(--acc); }
+  .sys   .who { background: transparent; color: var(--dim); }
+  .err   .who { background: #3a2226; color: var(--err); }
+  .sys .txt, .err .txt { color: var(--dim); font-size: 12.5px; }
+  .err .txt { color: var(--err); }
+  .ts { flex: none; color: #566; font-size: 11px; font-family: var(--mono); }
   h2 { font-size: 14px; margin: 0 0 12px; color: var(--dim); font-weight: 600; }
-  .hint { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; color: var(--dim); }
+  .stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Pico IO — WebHID 文本控制台</h1>
+  <h1>Pico IO — WebHID 协议控制台</h1>
   <div class="sub">
-    文本收发测试：发送文本 → 固件 echo 回包（<b>"pico" 前缀 + 原文</b>，UTF-8，单包 ≤ 63 字节）。
-    需 Chrome / Edge，<b>顶层页面</b>直接打开（file:// 或 localhost 即可）；
-    Firefox / Safari 不支持 WebHID。设备需已触发 <b>ability_enable(kbd, mouse, io)</b>
-    （默认脚本上电 5 秒后自动开启）。
+    协议 v1 验证：<b>INFO</b>（请求-应答对话）、<b>PRINT</b>（设备主动日志流，Lua print 实时显示，
+    任意长度自动分块/重组）。需 Chrome / Edge，<b>顶层页面</b>打开；设备需已触发
+    <b>ability_enable(kbd, mouse, io)</b>（默认脚本上电 5 秒后自动开启）。
   </div>
 
   <div class="panel">
@@ -77,35 +69,23 @@
       <button id="btnConnect">连接设备</button>
       <button id="btnDisconnect" class="ghost" disabled>断开</button>
       <span id="badge" class="badge">未连接</span>
-      <span id="devinfo" class="sub" style="margin:0"></span>
     </div>
   </div>
 
   <div class="panel">
-    <h2>文本收发</h2>
+    <h2>命令</h2>
     <div class="row">
-      <input type="text" id="msg" placeholder="输入要发送的文本（UTF-8，单包最多 63 字节，超长自动截断）" value="你好 pico">
-      <button id="btnSend" disabled>发送</button>
-    </div>
-    <div class="hint" id="byteinfo"></div>
-  </div>
-
-  <div class="panel">
-    <h2>周期 ping（文本包压测）</h2>
-    <div class="row">
-      <button id="btnPing" class="ghost" disabled>开始周期 ping</button>
-      <label>间隔 <input type="number" id="interval" value="100" min="10" step="10"> ms</label>
-      <label>包长 <input type="number" id="plen" value="63" min="1" max="63"> B</label>
+      <button id="btnInfo" disabled>INFO 查询</button>
+      <button id="btnClear" class="ghost">清空日志</button>
     </div>
   </div>
 
   <div class="panel">
     <h2>统计</h2>
     <div class="stats">
-      <span>发送 <b id="stTx">0</b></span>
-      <span>接收 <b id="stRx">0</b></span>
-      <span>校验失败 <b id="stBad">0</b></span>
-      <span>平均往返 <b id="stRtt">—</b></span>
+      <span>收到块 <b id="stChunks">0</b></span>
+      <span>收到消息 <b id="stMsgs">0</b></span>
+      <span>打印行 <b id="stPrints">0</b></span>
     </div>
   </div>
 
@@ -117,28 +97,172 @@
 <script>
 "use strict";
 
-const VID = 0x054c;          // Sony
-const USAGE_PAGE = 0xFF00;   // vendor page（与固件 desc_hid_report_io 一致）
-const REPORT_ID_IN = 1;      // 设备→主机
-const REPORT_ID_OUT = 2;     // 主机→设备
-const PAYLOAD_MAX = 63;
-const PREFIX = new TextEncoder().encode("pico");
+// ── 协议常量（与 src/usb_io.h 一致）──────────────────────────────────
+const VID = 0x054c, USAGE_PAGE = 0xFF00;
+const REPORT_ID_IN = 1, REPORT_ID_OUT = 2;
+const CHUNK_PAYLOAD = 63;                 // 1B Report ID + ≤63B 块
+const F_START = 0x01, F_END = 0x02, F_RESET = 0x04;
+const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03 };
+const CMD_NAME = { [CMD.INFO]: "INFO", [CMD.PRINT]: "PRINT", [CMD.RESET]: "RESET" };
 
-let device = null;
-let pingTimer = null;
-let pingSeq = 0;
-let tx = 0, rx = 0, bad = 0, rttSum = 0, rttN = 0;
-const t0 = performance.now();
+const enc = new TextEncoder();
+const dec = new TextDecoder("utf-8");
 
+function varintPut(v) {
+  const out = [];
+  while (v >= 0x80) { out.push((v & 0x7F) | 0x80); v >>>= 7; }
+  out.push(v);
+  return out;
+}
+
+const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, "0")).join(" ");
+const flagsStr = (f) =>
+  `${f & F_START ? "S" : ""}${f & F_END ? "E" : ""}${f & F_RESET ? "R" : ""}` || "C";
+
+// ── PicoIO：把 63B 分块/重组/msg_id 关联全部封装掉，上层只见
+//    send() / onmessage / request()（WebSocket 风格）──────────────────
+class PicoIO {
+  constructor() {
+    this.device = null;
+    this.onmessage = null;    // (cmd, body:Uint8Array, msgid) => void
+    this.onclose = null;
+    this.txSeq = 0;
+    this.msgSeq = 0;
+    this.pending = new Map(); // msgid → {resolve, reject, timer}
+    this.rx = null;           // {cmd, msgid, total, buf:[], got}
+    this.onchunk = null;      // 统计钩子
+  }
+
+  async open() {
+    const devices = await navigator.hid.requestDevice({
+      filters: [{ vendorId: VID, usagePage: USAGE_PAGE }],
+    });
+    if (!devices.length) throw new Error("未选择设备");
+    this.device = devices[0];
+    this.device.addEventListener("inputreport", (e) => this._onReport(e));
+    this.device.addEventListener("disconnect", () => {
+      for (const p of this.pending.values()) p.reject(new Error("设备断开"));
+      this.pending.clear();
+      this.onclose?.();
+    });
+    await this.device.open();
+    this._sendRaw(Uint8Array.from([this.txSeq++ & 0xFF, F_RESET]));   // 会话复位
+  }
+
+  async close() {
+    if (this.device) { try { await this.device.close(); } catch (_) {} }
+  }
+
+  // 每个报文都补齐到满 63B 载荷（+1B Report ID = 64B 线上长度），长度确定，
+  // 不依赖操作系统对短报文的补零行为
+  async _sendRaw(payload) {
+    const full = new Uint8Array(CHUNK_PAYLOAD);
+    full.set(payload);
+    console.info(`[picoio] TX ${payload.length}B→63B ${hex(full)}`);
+    await this.device.sendReport(REPORT_ID_OUT, full);
+  }
+
+  get isOpen() { return this.device?.opened ?? false; }
+
+  // 发一条消息（自动分块：短消息 START|END 单块，长消息 START…CONT…END）
+  async send(cmd, body = new Uint8Array(0)) {
+    const msgid = ++this.msgSeq & 0xFFFF;
+    const header = [cmd, msgid & 0xFF, (msgid >> 8) & 0xFF, ...varintPut(body.length)];
+    let sent = 0;
+    for (;;) {
+      const cap = CHUNK_PAYLOAD - 2 - (sent === 0 ? header.length : 0);
+      const n = Math.min(body.length - sent, cap);
+      const payload = [];
+      payload.push(this.txSeq++ & 0xFF);
+      const flags = (sent === 0 ? F_START : 0) | (sent + n >= body.length ? F_END : 0);
+      payload.push(flags);
+      if (sent === 0) payload.push(...header);
+      payload.push(...body.subarray(sent, sent + n));
+      console.info(`[picoio] TX ${flagsStr(flags)} cmd=${CMD_NAME[cmd] ?? cmd} ` +
+                    `msgid=${msgid} body=${sent}+${n}/${body.length}`);
+      await this._sendRaw(Uint8Array.from(payload));
+      this.onchunk?.();
+      sent += n;
+      if (sent >= body.length) break;
+    }
+    return msgid;
+  }
+
+  // 请求-应答：msgid 自动关联，超时 reject
+  request(cmd, body = new Uint8Array(0), timeoutMs = 2000) {
+    return new Promise((resolve, reject) => {
+      this.send(cmd, body).then((msgid) => {
+        console.info(`[picoio] REQ cmd=${CMD_NAME[cmd] ?? cmd} msgid=${msgid}`);
+        const timer = setTimeout(() => {
+          this.pending.delete(msgid);
+          console.info(`[picoio] REQ TIMEOUT cmd=${CMD_NAME[cmd] ?? cmd} msgid=${msgid}`);
+          reject(new Error(`请求 ${CMD_NAME[cmd] ?? cmd} 超时`));
+        }, timeoutMs);
+        this.pending.set(msgid, { resolve, reject, timer });
+      }, reject);
+    });
+  }
+
+  _onReport(e) {
+    if (e.reportId !== REPORT_ID_IN) return;
+    // Chrome 的 inputreport e.data 不含 Report ID（已在 e.reportId 给出）：
+    // raw = [seq, flags, data...]（Windows 会把短 IN 报文补零到满长）
+    const raw = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
+    if (raw.length < 2) return;
+    console.info(`[picoio] IN ${raw.length}B ${[...raw].map(b => b.toString(16).padStart(2, "0")).join(" ")}`);
+    const flags = raw[1];
+    const data = raw.subarray(2);
+    this.onchunk?.();
+
+    if (flags & F_START) {
+      const cmd = data[0];
+      const msgid = data[1] | (data[2] << 8);
+      let len = 0, shift = 0, i = 3;
+      for (; i < data.length; i++) {
+        len |= (data[i] & 0x7F) << shift;
+        if (!(data[i] & 0x80)) { i++; break; }
+        shift += 7;
+      }
+      this.rx = { cmd, msgid, total: len, buf: [], got: 0 };
+      console.info(`[picoio] RX START cmd=${CMD_NAME[cmd] ?? cmd} msgid=${msgid} total=${len}`);
+      this._feed(data.subarray(i));
+    } else if (this.rx) {
+      this._feed(data);
+    }
+
+    if (this.rx && (flags & F_END)) {
+      const m = this.rx; this.rx = null;
+      const body = Uint8Array.from(m.buf);
+      const p = this.pending.get(m.msgid);
+      if (p) {
+        clearTimeout(p.timer);
+        this.pending.delete(m.msgid);
+        p.resolve(body);
+        console.info(`[picoio] RX RESOLVED cmd=${CMD_NAME[m.cmd] ?? m.cmd} ` +
+                      `msgid=${m.msgid} len=${body.length}`);
+      }
+      this.onmessage?.(m.cmd, body, m.msgid);
+    }
+  }
+
+  _feed(data) {
+    // 主机侧报文可能被 Windows 补零到 64B，超出 total 的尾部丢弃
+    const take = Math.min(data.length, this.rx.total - this.rx.got);
+    for (const b of data.subarray(0, take)) this.rx.buf.push(b);
+    this.rx.got += take;
+    console.info(`[picoio] RX feed +${take} (drop ${data.length - take}) ` +
+                  `got=${this.rx.got}/${this.rx.total}`);
+  }
+}
+
+// ── UI ────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
-const enc = new TextEncoder();
-const dec = new TextDecoder("utf-8", { fatal: false });
+const t0 = performance.now();
+let io = null;
+let nChunks = 0, nMsgs = 0, nPrints = 0;
 
-function ts() {
-  const s = (performance.now() - t0) / 1000;
-  return s.toFixed(3);
-}
+function ts() { return ((performance.now() - t0) / 1000).toFixed(3); }
 function addMsg(kind, who, text) {
   const row = document.createElement("div");
   row.className = "msg " + kind;
@@ -150,62 +274,30 @@ function addMsg(kind, who, text) {
   logEl.scrollTop = logEl.scrollHeight;
   while (logEl.childElementCount > 500) logEl.firstChild.remove();
 }
-const sys  = (s) => addMsg("sys",  "系统", s);
-const err  = (s) => addMsg("bad",  "错误", s);
-const sent = (s) => addMsg("me",   "我",   s);
-const recv = (s) => addMsg("pico", "Pico", s);
+const sys = (s) => addMsg("sys", "系统", s);
+const err = (s) => addMsg("err", "错误", s);
 
-function byteInfo() {
-  const n = enc.encode($("msg").value).length;
-  $("byteinfo").textContent =
-    n > PAYLOAD_MAX ? `⚠ 当前 ${n} 字节，超出 63B 将截断` : `${n} / 63 字节`;
-}
-
-// UTF-8 安全截断：回退到上一个完整码元的边界
-function trimUtf8(bytes, max) {
-  let end = Math.min(bytes.length, max);
-  while (end > 0 && (bytes[end] & 0xC0) === 0x80) end--;   // 跳过续字节
-  return bytes.subarray(0, end);
+function stats() {
+  $("stChunks").textContent = nChunks;
+  $("stMsgs").textContent = nMsgs;
+  $("stPrints").textContent = nPrints;
 }
 
 function setConnected(on) {
   $("btnConnect").disabled = on;
   $("btnDisconnect").disabled = !on;
-  $("btnSend").disabled = !on;
-  $("btnPing").disabled = !on;
+  $("btnInfo").disabled = !on;
   $("badge").textContent = on ? "已连接" : "未连接";
   $("badge").classList.toggle("on", on);
 }
 
-function stats() {
-  $("stTx").textContent = tx;
-  $("stRx").textContent = rx;
-  $("stBad").textContent = bad;
-  $("stRtt").textContent = rttN ? (rttSum / rttN).toFixed(2) + " ms" : "—";
-}
-
-async function sendText(str) {
-  if (!device || !device.opened) return;
-  let bytes = enc.encode(str);
-  if (bytes.length > PAYLOAD_MAX) {
-    bytes = trimUtf8(bytes, PAYLOAD_MAX);
-    sys(`文本超长，已截断为 ${bytes.length} 字节`);
+async function doInfo() {
+  try {
+    const body = await io.request(CMD.INFO);
+    addMsg("info", "INFO", dec.decode(body));
+  } catch (e) {
+    err(e.message);
   }
-  const payload = new Uint8Array(PAYLOAD_MAX);
-  payload.set(bytes);
-  const sentAt = performance.now();
-  await device.sendReport(REPORT_ID_OUT, payload);
-  tx++; stats();
-  sent(dec.decode(bytes));
-  device._lastSentAt = sentAt;
-}
-
-async function sendRaw(payload) {
-  if (!device || !device.opened) return;
-  const sentAt = performance.now();
-  await device.sendReport(REPORT_ID_OUT, payload);
-  tx++; stats();
-  device._lastSentAt = sentAt;
 }
 
 async function connect() {
@@ -213,99 +305,44 @@ async function connect() {
     err("navigator.hid 不可用：需要 Chrome/Edge 且为顶层页面（不能在 iframe 里）");
     return;
   }
+  io = new PicoIO();
+  io.onchunk = () => { nChunks++; stats(); };
+  io.onclose = () => { setConnected(false); err("设备已断开（重枚举或拔出）"); };
+  io.onmessage = (cmd, body) => {
+    nMsgs++; stats();
+    if (cmd === CMD.PRINT) {
+      nPrints++; stats();
+      addMsg("print", "Pico", dec.decode(body));
+    }
+    // INFO 应答由 request() 的 Promise 呈现，此处不再重复显示
+  };
   try {
-    const devices = await navigator.hid.requestDevice({
-      filters: [{ vendorId: VID, usagePage: USAGE_PAGE }],
-    });
-    if (!devices.length) { sys("未选择设备"); return; }
-    device = devices[0];
-    device.addEventListener("inputreport", onInput);
-    device.addEventListener("disconnect", onDisconnect);
-    await device.open();
+    await io.open();
     setConnected(true);
-    sys(`已连接 ${device.productName || "Pico IO"} (VID 0x${device.vendorId.toString(16)}, PID 0x${device.productId.toString(16)})`);
-    $("devinfo").textContent = device.collections.length
-      ? `collections: ${device.collections.length}` : "";
-    byteInfo();
+    sys("已连接，会话已复位");
+    setTimeout(doInfo, 100);   // 连接后自动查询一次
   } catch (e) {
     err("连接失败: " + e.message);
   }
 }
 
 async function disconnect() {
-  stopPing();
-  if (device) {
-    try { await device.close(); } catch (_) {}
-  }
-}
-
-function onDisconnect() {
-  stopPing();
+  if (io) await io.close();
   setConnected(false);
-  err("设备已断开（重枚举或拔出）");
-}
-
-function onInput(e) {
-  const { reportId, data } = e;
-  if (reportId !== REPORT_ID_IN) return;
-  const payload = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  rx++;
-
-  let ok = payload.length >= PREFIX.length;
-  for (let i = 0; ok && i < PREFIX.length; i++) ok = payload[i] === PREFIX[i];
-
-  if (device && device._lastSentAt !== undefined) {
-    rttSum += performance.now() - device._lastSentAt;
-    rttN++;
-  }
-  if (ok) {
-    recv(dec.decode(payload.subarray(PREFIX.length)));
-  } else {
-    bad++;
-    err(`前缀校验失败，原始 ${payload.length}B: ` +
-        [...payload].map((b) => b.toString(16).padStart(2, "0")).join(" "));
-  }
-  stats();
-}
-
-function startPing() {
-  const ms = Math.max(10, $("interval").valueAsNumber || 100);
-  pingTimer = setInterval(() => {
-    const n = Math.max(1, Math.min(PAYLOAD_MAX, $("plen").valueAsNumber || 63));
-    pingSeq++;
-    const text = `ping #${String(pingSeq).padStart(6, "0")} `;
-    const payload = new Uint8Array(n);
-    payload.set(enc.encode(text));
-    payload.fill(0x2e, Math.min(text.length, n));   // '.' 填充到目标包长
-    sendRaw(payload).then(() => {
-      if (pingSeq % 10 === 0) sys(`ping 已发 ${pingSeq} 包（每包 ${n}B）`);
-    });
-  }, ms);
-  $("btnPing").textContent = "停止周期 ping";
-  sys(`周期 ping 已启动（${ms} ms × ${$("plen").valueAsNumber}B，echo 文本计入统计）`);
-}
-function stopPing() {
-  if (pingTimer) clearInterval(pingTimer);
-  pingTimer = null;
-  $("btnPing").textContent = "开始周期 ping";
+  sys("已断开");
 }
 
 $("btnConnect").onclick = connect;
 $("btnDisconnect").onclick = disconnect;
-$("btnSend").onclick = () => sendText($("msg").value);
-$("btnPing").onclick = () => (pingTimer ? stopPing() : startPing());
-$("msg").addEventListener("input", byteInfo);
-$("msg").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && device && device.opened) sendText($("msg").value);
-});
+$("btnInfo").onclick = doInfo;
+$("btnClear").onclick = () => { logEl.innerHTML = ""; };
 
 if (!("hid" in navigator)) {
   err("当前浏览器不支持 WebHID —— 请用 Chrome / Edge 顶层打开本页");
 } else {
-  sys("就绪。点击「连接设备」并选择 Pico IO（需固件已开启 IO 接口）");
+  sys("就绪。点击「连接设备」并选择 Pico IO（固件 IO 接口开启后可连接）");
 }
 stats();
-byteInfo();
 </script>
 </body>
 </html>

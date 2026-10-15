@@ -59,8 +59,9 @@ Lua `ability_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开�
 
 鼠标为无 Report ID 的 6B 相对报告；键盘描述符含 ID 1 的 6KRO 报告和 ID 2 的
 112 键位图报告，实际发送 NKRO。两者接口协议均为 None，不提供 USB HID Boot 协议。
-custom IO 通讯接口为 vendor usage page `0xFF00` 单接口（Report ID 1 = 设备→主机、
-ID 2 = 主机→设备，各 63B），echo 回包带 `pico` 前缀；文本收发测试页见
+custom IO 通讯接口为 vendor usage page `0xFF00` 单接口，跑自定义分块协议
+v1（INFO 查询 / PRINT 日志流 / RESET，varint 长度 + 分块重组，无 IAD 无
+逐包 CRC）；Lua `print` 经 4KB 跨核环双发（UART + 协议）。验证页见
 `tools/webhid-test.html`。所有追加接口均为单接口 HID、**无 IAD**——带 IAD 的
 USB 类（CDC/NCM 等）会令 Windows usbccgp 放弃 legacy 音频分组、拆散 DS5 音频
 接口（详见 docs/usb-hot-reload.md 与 exp/cdc-serial 分支的探索记录）。

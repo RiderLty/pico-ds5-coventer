@@ -74,14 +74,23 @@ IO 接口紧随键盘、IN `0x88` / OUT `0x08`、MPS 64B、1ms 间隔。
 总长度含 ID 为 16B。键盘描述符另有 ID 1 的 6KRO 与 LED output。
 键鼠接口协议均为 None，不是 Boot 键鼠接口。
 
-### IO 通讯接口（custom HID）
+### IO 通讯接口（custom HID，协议 v1）
 
 单接口双中断端点（IN `0x88` / OUT `0x08`）、vendor usage page `0xFF00`、
-**无 IAD**。Report ID 1 = 设备→主机（63B payload），Report ID 2 = 主机→设备
-（63B payload）；echo 回包 = `"pico"` 前缀 + 原 payload 前 59B，共 63B。
-数据通路全在 core0（OUT 端点数据经 `tud_hid_set_report_cb` → `usb_io_task`
-echo），无跨核队列。主机侧用 `tools/webhid-test.html`（Chrome/Edge，WebHID）
-做文本收发测试：连接过滤器 `{vendorId: 0x054c, usagePage: 0xFF00}`。
+**无 IAD**。Report ID 1 = 设备→主机，Report ID 2 = 主机→设备；每报文
+1B Report ID + ≤63B 协议块。分块格式：`[seq:1][flags:1][data:0..61]`，
+flags START/END/RESET（START|END = 单块完整消息），START 块 data 头为
+`[cmd:1][msg_id:2 LE][varint total_len]`。USB HID 链路可靠有序，故无逐包
+CRC、无重传，流控靠端点 NAK 背压。
+
+命令：`INFO`（主机查询，设备回文本：构建时间/运行时长/接口开关/丢包计数）、
+`PRINT`（设备→主机日志，任意长度自动分块）、`RESET`（会话复位）。
+Lua `print` 双发：UART 照旧先行，再非阻塞入 **4KB 跨核消息环**
+（core1 生产 + core0 应答生产、core0 task 消费，striped 锁；环满整条丢弃
+并计数），usb_io_task 从环就地分块发送 —— 生产者与主机均对分块无感。
+主机侧用 `tools/webhid-test.html`（Chrome/Edge，WebHID，协议封装类
+`PicoIO`）验证 INFO 对话与 print 日志流；连接过滤器
+`{vendorId: 0x054c, usagePage: 0xFF00}`。
 
 **无 IAD 是有意的**：Windows usbccgp 只要配置描述符里出现任何 IAD 就只用
 IAD 分组、放弃 legacy 音频分组，未覆盖的多接口功能会被拆散 —— 带 IAD 的

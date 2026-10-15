@@ -643,14 +643,14 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            uint8_t const *buffer, uint16_t bufsize)
 {
     // IO 实例：OUT 端点数据由驱动原样转发 —— buffer[0] 是 Report ID，
-    // payload 从 buffer+1 开始（共 63B）；控制 SET_REPORT 路径的 ID 在
-    // report_id 参数里、buffer 已剥离。取 payload 交给 usb_io echo。
+    // payload 从 buffer+1 开始（协议块，usb_io_rx 重组分发）；控制
+    // SET_REPORT 路径的 ID 在 report_id 参数里、buffer 已剥离。
     if (usb_io_enabled() && itf == usb_io_instance()) {
         if (report_type == HID_REPORT_TYPE_OUTPUT) {
             if (report_id == 0 && bufsize >= 1u) {
-                usb_io_receive(buffer + 1, (uint16_t)(bufsize - 1u));
+                usb_io_rx(buffer + 1, (uint16_t)(bufsize - 1u));
             } else if (report_id == IO_REPORT_ID_OUT && bufsize >= 1u) {
-                usb_io_receive(buffer, bufsize);
+                usb_io_rx(buffer, bufsize);
             }
         }
         return;
