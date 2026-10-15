@@ -2,13 +2,11 @@
  * hidkit 输入接线层实现（参考 pico-hid-mapper 的 src/hidkit_app.c 精简）。
  *
  * 与 mapper 版的差异：**输入与输出完全解耦，中间只有 Lua** ——
- *   - 键盘/鼠标事件**单向转发** Lua（无返回值；C 侧键鼠→手柄的固定映射
- *     管线已整体移除，ds5_pad 不再吃键鼠）
- *   - 手柄事件双向：转发 Lua + 维护 BTN 掩码随 PAD 帧入队（C 直通 DS5，
- *     pad.* 接口落地后此直通移交 Lua）
+ *   - 全部 hidkit 事件单向转发 Lua（键鼠/手柄/触摸/六轴均无 C 直通管线）
+ *   - 手柄/触摸/六轴输出由 Lua 脚本的 pad_* 函数经 input_queue 驱动 ds5_pad
  *   - Switch Pro 握手库移植层在此收口（时间/日志/校准交付）
  *   - usbh_app_driver_get_cb 全工程唯一定义（XInput 类驱动注册）
- *   - lua_binder_rebind 在此实现：print/warn 覆盖 + hidkit 信息表
+ *   - lua_binder_rebind 在此实现：print/warn 覆盖 + hidkit 信息表 + pad_* 输出
  *
  * include 顺序：先 tusb.h 再 hidkit —— hidkit 的 MOUSE_BUTTON_* 宏与
  * TinyUSB 的 HID 枚举名重叠（见 hidkit_switch_pro_glue.h 的说明）。
@@ -51,43 +49,19 @@ typedef struct {
 } dev_reg_t;
 static dev_reg_t s_dev[CFG_TUH_HID];
 
-// 手柄状态（多手柄合并到最后一份状态上；转换器场景可接受）
-static int16_t s_pad_lsx, s_pad_lsy, s_pad_rsx, s_pad_rsy;
-static uint8_t s_pad_lt, s_pad_rt;
-static uint32_t s_pad_btnmask;
-
 /*--------------------------------------------------------------------+
- * 队列打包
+ * pad.* Lua 输出：手柄/触摸/六轴 → input_queue → core0 ds5_pad
  *--------------------------------------------------------------------*/
 
-// 手柄帧（见 input_queue.h 布局）入队
-static void send_pad(void)
-{
-    uint8_t payload[INQ_PAD_PAYLOAD];
-    payload[0] = 0x01u;                                 // flags: connected
-    payload[1] = (uint8_t)(s_pad_lsx & 0xFF);
-    payload[2] = (uint8_t)(((uint16_t)s_pad_lsx >> 8) & 0xFF);
-    payload[3] = (uint8_t)(s_pad_lsy & 0xFF);
-    payload[4] = (uint8_t)(((uint16_t)s_pad_lsy >> 8) & 0xFF);
-    payload[5] = (uint8_t)(s_pad_rsx & 0xFF);
-    payload[6] = (uint8_t)(((uint16_t)s_pad_rsx >> 8) & 0xFF);
-    payload[7] = (uint8_t)(s_pad_rsy & 0xFF);
-    payload[8] = (uint8_t)(((uint16_t)s_pad_rsy >> 8) & 0xFF);
-    // 扳机已在 hidkit_input_gamepad_abs 折算 0..32767 → 0..255
-    payload[9]  = s_pad_lt;
-    payload[10] = s_pad_rt;
-    payload[11] = (uint8_t)(s_pad_btnmask & 0xFF);
-    payload[12] = (uint8_t)((s_pad_btnmask >> 8) & 0xFF);
-    payload[13] = (uint8_t)((s_pad_btnmask >> 16) & 0xFF);
-    payload[14] = (uint8_t)((s_pad_btnmask >> 24) & 0xFF);
-    input_queue_send(INQ_KIND_PAD, payload, sizeof(payload));
-}
+// pad 按键掩码（Lua pad_btn 维护；随 pad_abs 帧带出，与手柄帧不互斥）
+static uint32_t s_pad_out_btnmask;
 
-// 手柄断连标记（core0 据此清手柄状态、回落键鼠映射）
-static void send_pad_disconnect(void)
+// pad_disconnect 内部实现（umount 自动断连 + Lua 可手动调用）
+static void pad_send_disconnect(void)
 {
     static const uint8_t payload[INQ_PAD_PAYLOAD] = { 0 };
     input_queue_send(INQ_KIND_PAD, payload, sizeof(payload));
+    s_pad_out_btnmask = 0;
 }
 
 /*--------------------------------------------------------------------+
@@ -95,8 +69,7 @@ static void send_pad_disconnect(void)
  *--------------------------------------------------------------------*/
 
 // 键盘 + 鼠标按键 + 手柄按键统一出口，code 段前缀区分类型（hidkit_codes.h）。
-// 键盘/鼠标段单向转发 Lua（键鼠→手柄的 C 固定管线已移除）；手柄段额外维护
-// BTN 位掩码（随 PAD 帧入队，C 直通 DS5，pad.* 落地后移交 Lua）。
+// 全部单向转发 Lua；手柄输出由 Lua pad_* 函数驱动。
 void __no_inline_not_in_flash_func(hidkit_input_key)(int8_t slot, uint16_t code, bool pressed)
 {
     (void)slot;
@@ -116,11 +89,6 @@ void __no_inline_not_in_flash_func(hidkit_input_key)(int8_t slot, uint16_t code,
         uint8_t btn = (uint8_t)(code & 0xFFu);
         if (btn > 31u) return;
         lua_binder_on_gamepad_btn(btn, pressed);
-
-        if (pressed) s_pad_btnmask |= (1u << btn);
-        else         s_pad_btnmask &= ~(1u << btn);
-        // 不在此发帧：hidkit 的按键边沿后总跟着同一份报文的 gamepad_abs
-        // （含 umount 补发的全零轴），随那帧带出位掩码即可
         break;
     }
 
@@ -138,11 +106,12 @@ void __no_inline_not_in_flash_func(hidkit_input_mouse_abs)(int8_t slot, int32_t 
 }
 
 // 手柄绝对状态：每份解析成功的报文都回调（125~1000Hz）
+// 全量转发 Lua；输出由脚本 pad_abs() 驱动
 void __no_inline_not_in_flash_func(hidkit_input_gamepad_abs)(int8_t slot, int32_t ls_x, int32_t ls_y,
                                                              int32_t rs_x, int32_t rs_y,
                                                              int32_t lt, int32_t rt, uint32_t buttons)
 {
-    (void)buttons;   // 按键另经 key 出口的 GAMEPAD 段进入位掩码
+    (void)buttons;   // 按键另经 key 出口的 GAMEPAD 段转发 Lua
     if (ls_x < -32767) ls_x = -32767;   // 闭区间 -32767..32767（hidkit 约定）
     if (ls_y < -32767) ls_y = -32767;
     if (rs_x < -32767) rs_x = -32767;
@@ -151,18 +120,9 @@ void __no_inline_not_in_flash_func(hidkit_input_gamepad_abs)(int8_t slot, int32_
     if (rt < 0) rt = 0; else if (rt > 32767) rt = 32767;
 
     lua_binder_on_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
-
-    s_pad_lsx = (int16_t)ls_x;
-    s_pad_lsy = (int16_t)ls_y;
-    s_pad_rsx = (int16_t)rs_x;
-    s_pad_rsy = (int16_t)rs_y;
-    s_pad_lt  = (uint8_t)(lt >> 7);
-    s_pad_rt  = (uint8_t)(rt >> 7);
-
-    send_pad();
 }
 
-// 六轴：C 侧无消费，仅转发 Lua（enable_listen_motion 门控）
+// 六轴：C 侧无消费，仅转发 Lua
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az)
 {
@@ -260,7 +220,7 @@ void input_app_umount(uint8_t instance)
     int8_t const slot = s_slot[instance];
     if (slot >= 0) {
         if (hidkit_is_gamepad(slot)) {
-            send_pad_disconnect();   // core0 回落键鼠映射
+            pad_send_disconnect();   // 通知 core0 手柄断连
         }
         // 库内先补发该槽位仍按着的键/鼠标键"松开"、手柄轴归零
         hidkit_umount(slot);
@@ -496,6 +456,124 @@ static int _lcb_dmo_is_down(lua_State *L) {
     return 1;
 }
 
+/*--------------------------------------------------------------------+
+ * Lua：手柄/触摸/六轴输出接口（pad_*）
+ *
+ *   pad_btn(code, pressed)        手柄按键状态（hidkit BTN_* 0..31）
+ *   pad_abs(lsx, lsy, rsx, rsy, lt, rt)
+ *                                  手柄轴/扳机（-32767..32767 / 0..32767），
+ *                                  携带当前 pad_btn 维护的按键掩码入队
+ *   pad_touch(x0, y0, x1, y1, down1, down2)
+ *                                  触摸板 2 触点（12-bit 坐标，down = 在位）
+ *   pad_motion(gx, gy, gz, ax, ay, az)
+ *                                  六轴（±32767；陀螺 ±2000dps / 加速度 ±4g）
+ *   pad_disconnect()               发送手柄断连帧（清零状态）
+ *
+ * 数据通路：core1 pad_* → input_queue → core0 ds5_pad → DS5 报告。
+ *--------------------------------------------------------------------*/
+
+// pad_btn(code, pressed)：维护按键掩码（随下次 pad_abs 带出）
+static int _lcb_pad_btn(lua_State *L) {
+    int code    = (int)luaL_checkinteger(L, 1);
+    bool pressed = lua_toboolean(L, 2) != 0;
+    if (code < 0 || code > 31) return 0;
+    if (pressed) s_pad_out_btnmask |= (1u << code);
+    else         s_pad_out_btnmask &= ~(1u << code);
+    return 0;
+}
+
+// pad_abs(lsx, lsy, rsx, rsy, lt, rt)：打包手柄帧入队
+static int _lcb_pad_abs(lua_State *L) {
+    int32_t lsx = (int32_t)luaL_checkinteger(L, 1);
+    int32_t lsy = (int32_t)luaL_checkinteger(L, 2);
+    int32_t rsx = (int32_t)luaL_checkinteger(L, 3);
+    int32_t rsy = (int32_t)luaL_checkinteger(L, 4);
+    int32_t lt  = (int32_t)luaL_checkinteger(L, 5);
+    int32_t rt  = (int32_t)luaL_checkinteger(L, 6);
+    // 钳制到 hidkit 归一化范围
+    if (lsx < -32767) lsx = -32767; else if (lsx > 32767) lsx = 32767;
+    if (lsy < -32767) lsy = -32767; else if (lsy > 32767) lsy = 32767;
+    if (rsx < -32767) rsx = -32767; else if (rsx > 32767) rsx = 32767;
+    if (rsy < -32767) rsy = -32767; else if (rsy > 32767) rsy = 32767;
+    if (lt < 0) lt = 0; else if (lt > 32767) lt = 32767;
+    if (rt < 0) rt = 0; else if (rt > 32767) rt = 32767;
+
+    uint8_t payload[INQ_PAD_PAYLOAD];
+    payload[0] = 0x01u;    // flags: connected
+    payload[1]  = (uint8_t)((uint16_t)(int16_t)lsx & 0xFF);
+    payload[2]  = (uint8_t)(((uint16_t)(int16_t)lsx >> 8) & 0xFF);
+    payload[3]  = (uint8_t)((uint16_t)(int16_t)lsy & 0xFF);
+    payload[4]  = (uint8_t)(((uint16_t)(int16_t)lsy >> 8) & 0xFF);
+    payload[5]  = (uint8_t)((uint16_t)(int16_t)rsx & 0xFF);
+    payload[6]  = (uint8_t)(((uint16_t)(int16_t)rsx >> 8) & 0xFF);
+    payload[7]  = (uint8_t)((uint16_t)(int16_t)rsy & 0xFF);
+    payload[8]  = (uint8_t)(((uint16_t)(int16_t)rsy >> 8) & 0xFF);
+    payload[9]  = (uint8_t)(lt >> 7);    // 0..32767 → 0..255
+    payload[10] = (uint8_t)(rt >> 7);
+    payload[11] = (uint8_t)(s_pad_out_btnmask & 0xFF);
+    payload[12] = (uint8_t)((s_pad_out_btnmask >> 8) & 0xFF);
+    payload[13] = (uint8_t)((s_pad_out_btnmask >> 16) & 0xFF);
+    payload[14] = (uint8_t)((s_pad_out_btnmask >> 24) & 0xFF);
+    input_queue_send(INQ_KIND_PAD, payload, sizeof(payload));
+    return 0;
+}
+
+// pad_touch(x0, y0, x1, y1, down1, down2)：触摸板 2 触点入队
+static int _lcb_pad_touch(lua_State *L) {
+    uint16_t x0    = (uint16_t)luaL_checkinteger(L, 1);
+    uint16_t y0    = (uint16_t)luaL_checkinteger(L, 2);
+    uint16_t x1    = (uint16_t)luaL_checkinteger(L, 3);
+    uint16_t y1    = (uint16_t)luaL_checkinteger(L, 4);
+    bool     down1 = lua_toboolean(L, 5) != 0;
+    bool     down2 = lua_toboolean(L, 6) != 0;
+
+    uint8_t payload[INQ_TOUCH_PAYLOAD];
+    payload[0] = (uint8_t)(x0 & 0xFF);
+    payload[1] = (uint8_t)((x0 >> 8) & 0xFF);
+    payload[2] = (uint8_t)(y0 & 0xFF);
+    payload[3] = (uint8_t)((y0 >> 8) & 0xFF);
+    payload[4] = (uint8_t)(x1 & 0xFF);
+    payload[5] = (uint8_t)((x1 >> 8) & 0xFF);
+    payload[6] = (uint8_t)(y1 & 0xFF);
+    payload[7] = (uint8_t)((y1 >> 8) & 0xFF);
+    payload[8] = (uint8_t)((down1 ? 0x01u : 0) | (down2 ? 0x02u : 0));
+    input_queue_send(INQ_KIND_TOUCH, payload, sizeof(payload));
+    return 0;
+}
+
+// pad_motion(gx, gy, gz, ax, ay, az)：六轴入队
+static int _lcb_pad_motion(lua_State *L) {
+    int16_t gx = (int16_t)luaL_checkinteger(L, 1);
+    int16_t gy = (int16_t)luaL_checkinteger(L, 2);
+    int16_t gz = (int16_t)luaL_checkinteger(L, 3);
+    int16_t ax = (int16_t)luaL_checkinteger(L, 4);
+    int16_t ay = (int16_t)luaL_checkinteger(L, 5);
+    int16_t az = (int16_t)luaL_checkinteger(L, 6);
+
+    uint8_t payload[INQ_MOTION_PAYLOAD];
+    payload[0]  = (uint8_t)((uint16_t)gx & 0xFF);
+    payload[1]  = (uint8_t)(((uint16_t)gx >> 8) & 0xFF);
+    payload[2]  = (uint8_t)((uint16_t)gy & 0xFF);
+    payload[3]  = (uint8_t)(((uint16_t)gy >> 8) & 0xFF);
+    payload[4]  = (uint8_t)((uint16_t)gz & 0xFF);
+    payload[5]  = (uint8_t)(((uint16_t)gz >> 8) & 0xFF);
+    payload[6]  = (uint8_t)((uint16_t)ax & 0xFF);
+    payload[7]  = (uint8_t)(((uint16_t)ax >> 8) & 0xFF);
+    payload[8]  = (uint8_t)((uint16_t)ay & 0xFF);
+    payload[9]  = (uint8_t)(((uint16_t)ay >> 8) & 0xFF);
+    payload[10] = (uint8_t)((uint16_t)az & 0xFF);
+    payload[11] = (uint8_t)(((uint16_t)az >> 8) & 0xFF);
+    input_queue_send(INQ_KIND_MOTION, payload, sizeof(payload));
+    return 0;
+}
+
+// pad_disconnect()：发送断连帧
+static int _lcb_pad_disconnect(lua_State *L) {
+    (void)L;
+    pad_send_disconnect();
+    return 0;
+}
+
 void lua_binder_rebind(void) {
     lua_binder_bind("print", _lcb_print);
     lua_binder_bind("warn",  _lcb_warn);
@@ -514,6 +592,13 @@ void lua_binder_rebind(void) {
     lua_binder_bind("dmo_is_down",     _lcb_dmo_is_down);
     lua_binder_bind("dmo_is_on",       _lcb_dmo_is_on);
     lua_binder_bind("dhid_is_on",      _lcb_dhid_is_on);
+
+    // pad_* 手柄/触摸/六轴输出（驱动 DS5 报告）
+    lua_binder_bind("pad_btn",         _lcb_pad_btn);
+    lua_binder_bind("pad_abs",         _lcb_pad_abs);
+    lua_binder_bind("pad_touch",       _lcb_pad_touch);
+    lua_binder_bind("pad_motion",      _lcb_pad_motion);
+    lua_binder_bind("pad_disconnect",  _lcb_pad_disconnect);
 
 
 

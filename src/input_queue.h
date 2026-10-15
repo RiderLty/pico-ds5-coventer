@@ -14,9 +14,11 @@
  */
 
 // 记录 kind 标签（每条记录第 1 字节）。
-// 手柄直通帧（PAD）是唯一记录类型 —— 键鼠→手柄的固定管线已移除
-// （键鼠输入经 Lua 转发到宿主键鼠接口，见 input_app.c）
-#define INQ_KIND_PAD  4u   // 其余字节 = 手柄帧（15B，布局见下）
+// 手柄帧（PAD）+ 触摸帧（TOUCH）+ 六轴帧（MOTION）—— 全部由 Lua 脚本
+// 的 pad_* 输出函数入队，core0 的 ds5_pad 消费。
+#define INQ_KIND_PAD    4u   // 手柄帧（15B，布局见下）
+#define INQ_KIND_TOUCH  5u   // 触摸帧（9B，布局见下）
+#define INQ_KIND_MOTION 6u   // 六轴帧（12B，布局见下）
 
 // 手柄帧布局（INQ_KIND_PAD 之后，小端）：
 //   [0]      flags：bit0 = 手柄已连接（0 = 断连标记，其余字节应全零）
@@ -28,6 +30,23 @@
 //   [10]     rt    u8
 //   [11..14] btnmask u32（bit n = hidkit BTN_* n 按住；BTN_* ∈ 0x01..0x1B）
 #define INQ_PAD_PAYLOAD 15u
+
+// 触摸帧布局（INQ_KIND_TOUCH 之后，小端）：
+//   [0..1]   x0  u16（12-bit 有效，设备原生分辨率）
+//   [2..3]   y0  u16
+//   [4..5]   x1  u16
+//   [6..7]   y1  u16
+//   [8]      flags：bit0 = 触点 0 在位 / bit1 = 触点 1 在位
+#define INQ_TOUCH_PAYLOAD 9u
+
+// 六轴帧布局（INQ_KIND_MOTION 之后，小端）：
+//   [0..1]  gx i16（陀螺 X，±32767 = ±2000 dps）
+//   [2..3]  gy i16
+//   [4..5]  gz i16
+//   [6..7]  ax i16（加速度 X，±32767 = ±4 g）
+//   [8..9]  ay i16
+//   [10..11] az i16
+#define INQ_MOTION_PAYLOAD 12u
 
 // 单条记录负载上限（字节）
 #define INQ_REC_MAX   16u

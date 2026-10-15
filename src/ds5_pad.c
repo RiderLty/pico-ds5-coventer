@@ -1,14 +1,14 @@
 /*
- * DS5 映射引擎实现 —— 手柄直通版。
+ * DS5 映射引擎实现 —— 全 Lua 驱动版。
  *
- * 手柄状态 → DualSense 0x01 输入报告。按键位布局遵循内核
+ * 手柄/触摸/六轴状态 → DualSense 0x01 输入报告。按键位布局遵循内核
  * hid-playstation.c 的 USB 输入报告（与 DS5Dongle 的抓包模板一致）。
  *
- * 输入源：手柄帧（hidkit 归一化，见 input_queue.h 的 PAD 布局）——
- *   摇杆/扳机/十字键/按键直通覆盖；未接入时报告维持空闲态
- *   （摇杆回中、按键全零）。键鼠→手柄的固定映射已移除（键鼠输出
- *   经 Lua 转发到宿主键鼠接口）；pad.* Lua 接口落地后，手柄直通
- *   亦将移交 Lua。
+ * 输入源（全部由 Lua pad_* 输出函数经 input_queue 投递）：
+ *   PAD    — 摇杆/扳机/十字键/按键
+ *   TOUCH  — 触摸板 2 触点坐标
+ *   MOTION — 陀螺仪 + 加速度计六轴
+ * 未接入时报告维持空闲态（摇杆回中、按键全零）。
  */
 
 #include <string.h>
@@ -31,6 +31,12 @@
 #define OFF_BTN0    7u   // 低4位 hat + bit4□ bit5✕ bit6○ bit7△
 #define OFF_BTN1    8u   // bit0 L1 bit1 R1 bit2 L2 bit3 R2 bit4 Create bit5 Options bit6 L3 bit7 R3
 #define OFF_BTN2    9u   // bit0 PS bit1 触摸板按键 bit2 静音
+#define OFF_GYRO_X  15u
+#define OFF_GYRO_Y  17u
+#define OFF_GYRO_Z  19u
+#define OFF_ACCEL_X 21u
+#define OFF_ACCEL_Y 23u
+#define OFF_ACCEL_Z 25u
 #define OFF_TOUCH   32u  // touch points[2]，各 4 字节
 #define OFF_STATUS0 52u
 
@@ -69,6 +75,16 @@ static bool     s_pad_connected;
 static int16_t  s_pad_lsx, s_pad_lsy, s_pad_rsx, s_pad_rsy;
 static uint8_t  s_pad_lt, s_pad_rt;
 static uint32_t s_pad_btnmask;      // bit n = hidkit BTN_* n 按住
+
+// 触摸板输入状态（DS5 原生 12-bit 坐标，2 触点）
+static uint16_t s_touch_x0, s_touch_y0, s_touch_x1, s_touch_y1;
+static bool     s_touch1, s_touch2;
+
+// 六轴输入状态（±32767，陀螺 ±2000dps / 加速度 ±4g）
+static int16_t  s_gx, s_gy, s_gz, s_ax, s_ay, s_az;
+
+// 清空触摸/六轴状态到全零（断连时调用；定义见文件末尾 update_touch 附近）
+static void clear_touch_motion(void);
 
 // 报告模板：来自 DS5Dongle 对真实 DS5 的抓包（保留 reserved/status 区域）
 static const uint8_t s_report_template[DS_REPORT_LEN] = {
@@ -129,6 +145,7 @@ void ds5_pad_feed_pad(const uint8_t *data, uint8_t len)
         s_pad_btnmask = 0;
         s_pad_lt = s_pad_rt = 0;
         s_pad_lsx = s_pad_lsy = s_pad_rsx = s_pad_rsy = 0;
+        clear_touch_motion();
         return;
     }
 
@@ -143,6 +160,28 @@ void ds5_pad_feed_pad(const uint8_t *data, uint8_t len)
                   | ((uint32_t)data[12] << 8)
                   | ((uint32_t)data[13] << 16)
                   | ((uint32_t)data[14] << 24);
+}
+
+void ds5_pad_feed_touch(const uint8_t *data, uint8_t len)
+{
+    if (len < INQ_TOUCH_PAYLOAD) return;
+    s_touch_x0 = (uint16_t)(data[0] | ((uint16_t)data[1] << 8));
+    s_touch_y0 = (uint16_t)(data[2] | ((uint16_t)data[3] << 8));
+    s_touch_x1 = (uint16_t)(data[4] | ((uint16_t)data[5] << 8));
+    s_touch_y1 = (uint16_t)(data[6] | ((uint16_t)data[7] << 8));
+    s_touch1   = (data[8] & 0x01u) != 0;
+    s_touch2   = (data[8] & 0x02u) != 0;
+}
+
+void ds5_pad_feed_motion(const uint8_t *data, uint8_t len)
+{
+    if (len < INQ_MOTION_PAYLOAD) return;
+    s_gx = (int16_t)(data[0]  | ((uint16_t)data[1]  << 8));
+    s_gy = (int16_t)(data[2]  | ((uint16_t)data[3]  << 8));
+    s_gz = (int16_t)(data[4]  | ((uint16_t)data[5]  << 8));
+    s_ax = (int16_t)(data[6]  | ((uint16_t)data[7]  << 8));
+    s_ay = (int16_t)(data[8]  | ((uint16_t)data[9]  << 8));
+    s_az = (int16_t)(data[10] | ((uint16_t)data[11] << 8));
 }
 
 // 四方向 → hat 值
@@ -199,6 +238,43 @@ static void update_pad_buttons(void)
     else          s_report[OFF_BTN1] &= (uint8_t)~0x08u;
 }
 
+// DS5 触摸点写入（12-bit 坐标打包，内核 hid-playstation.c 格式）：
+//   byte[0] = x & 0xFF
+//   byte[1] = ((y >> 8) & 0x0F) << 4 | ((x >> 8) & 0x0F)
+//   byte[2] = y & 0xFF
+//   byte[3] = touching ? 0x00 : 0x80  (bit7=1 = 未触摸)
+static void pack_touch_point(uint8_t *p, uint16_t x, uint16_t y, bool touching)
+{
+    p[0] = (uint8_t)(x & 0xFF);
+    p[1] = (uint8_t)((((y >> 8) & 0x0F) << 4) | ((x >> 8) & 0x0F));
+    p[2] = (uint8_t)(y & 0xFF);
+    p[3] = touching ? 0x00u : 0x80u;
+}
+
+// 触摸板 2 触点直通
+static void update_touch(void)
+{
+    pack_touch_point(&s_report[OFF_TOUCH],      s_touch_x0, s_touch_y0, s_touch1);
+    pack_touch_point(&s_report[OFF_TOUCH + 4],  s_touch_x1, s_touch_y1, s_touch2);
+}
+
+// 六轴直通（3 字节 LE → 报告内 int16 LE）
+static void pack_motion_u16(uint8_t off, int16_t v)
+{
+    s_report[off]     = (uint8_t)((uint16_t)v & 0xFF);
+    s_report[off + 1] = (uint8_t)(((uint16_t)v >> 8) & 0xFF);
+}
+
+static void update_motion(void)
+{
+    pack_motion_u16(OFF_GYRO_X,  s_gx);
+    pack_motion_u16(OFF_GYRO_Y,  s_gy);
+    pack_motion_u16(OFF_GYRO_Z,  s_gz);
+    pack_motion_u16(OFF_ACCEL_X, s_ax);
+    pack_motion_u16(OFF_ACCEL_Y, s_ay);
+    pack_motion_u16(OFF_ACCEL_Z, s_az);
+}
+
 // 空闲态：摇杆回中、扳机归零、hat 居中、按键全清
 static void update_idle(void)
 {
@@ -213,6 +289,14 @@ static void update_idle(void)
     s_report[OFF_BTN2] = 0;
 }
 
+// 清空触摸/六轴状态到全零（断连时调用）
+static void clear_touch_motion(void)
+{
+    s_touch_x0 = s_touch_y0 = s_touch_x1 = s_touch_y1 = 0;
+    s_touch1 = s_touch2 = false;
+    s_gx = s_gy = s_gz = s_ax = s_ay = s_az = 0;
+}
+
 void ds5_pad_tick(void)
 {
     if (s_pad_connected) {
@@ -221,6 +305,9 @@ void ds5_pad_tick(void)
     } else {
         update_idle();
     }
+    // 触摸板与六轴始终应用（即使手柄断连时也保持最后的值或全零）
+    update_touch();
+    update_motion();
 }
 
 void ds5_pad_build_report(uint8_t *out)

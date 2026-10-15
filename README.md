@@ -83,22 +83,23 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 
 ## Lua 接线
 
-脚本通过 `enable_listen_*` 声明监听，未监听的事件跳过 VM。
-默认脚本将键盘、鼠标按键、位移和滚轮原样转发。
+hidkit 事件全量直投 Lua 回调，无需 `enable_listen_*` 声明。
+默认脚本将键盘、鼠标、手柄、触摸和六轴原样转发。
 
-| 监听函数 | 事件回调 |
+| 事件回调 | 说明 |
 |---|---|
-| `enable_listen_keys(keycode, ...)` | `on_key(keycode, down)` |
-| `enable_listen_mouse_btn(button, ...)` | `on_mouse_btn(button, down)` |
-| `enable_listen_mouse_move()` | `on_mouse_move(dx, dy)` |
-| `enable_listen_mouse_wheel()` | `on_mouse_wheel(wheel)` |
-| `enable_listen_gamepad_btn(code, ...)` | `on_gamepad_btn(code, pressed)` |
-| `enable_listen_gamepad()` | `on_gamepad_abs(lsx, lsy, rsx, rsy, lt, rt)` |
-| `enable_listen_motion()` | `on_motion(gx, gy, gz, ax, ay, az)` |
+| `on_key(keycode, down)` | 键盘按键（HID Usage ID） |
+| `on_mouse_btn(button, down)` | 鼠标按键（0..7） |
+| `on_mouse_move(dx, dy)` | 鼠标位移 |
+| `on_mouse_wheel(wheel)` | 鼠标滚轮 |
+| `on_gamepad_btn(code, pressed)` | 手柄按键（hidkit BTN_* 0..31） |
+| `on_gamepad_abs(lsx, lsy, rsx, rsy, lt, rt)` | 手柄轴（±32767）/扳机（0..32767） |
+| `on_motion(gx, gy, gz, ax, ay, az)` | 六轴（陀螺 ±2000dps / 加速度 ±4g，归一化 ±32767） |
+| `on_touchpad(meta, dims, x0, y0, ..., x9, y9)` | 触摸板快照（10 槽位，meta bit0-9 触点在位） |
+| `on_dropped(slot, vid, pid)` | 设备被丢弃通知 |
+| `tick(dt_us)` | 周期回调（dt = 距上次微秒差） |
 
-同名 `disable_listen_*` 关闭监听；keys/mouse_btn/gamepad_btn 无参数时清空全部。
-另有 `tick(dt_us)`、`on_touchpad(meta, dims, x0, y0, x1, y1)`、
-`on_dropped(slot, vid, pid)`。`hidkit.info()` 输出登记表，`hidkit.BTN_*` 等提供语义常量。
+`hidkit.info()` 输出登记表，`hidkit.BTN_*` 等提供语义常量。
 
 | 输出函数 | 用途 |
 |---|---|
@@ -110,6 +111,11 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 | `dmo_btn(button, down)` | 0=左、1=右、2=中、3=后退、4=前进 |
 | `dmo_release_all()` / `dmo_is_down(button)` | 抬起全部鼠标键 / 查询按键 |
 | `dmo_is_on()` / `dmo_state()` | 生效开关 / 按键位掩码 |
+| `pad_btn(code, pressed)` | 手柄按键状态（hidkit BTN_* 0..31） |
+| `pad_abs(lsx, lsy, rsx, rsy, lt, rt)` | 手柄轴/扳机（±32767 / 0..32767） |
+| `pad_touch(x0, y0, x1, y1, down1, down2)` | 触摸板 2 触点（12-bit 坐标） |
+| `pad_motion(gx, gy, gz, ax, ay, az)` | 六轴（±32767） |
+| `pad_disconnect()` | 手柄断连帧（清零状态） |
 
 接口关闭时输出调用不转发。`dkb_is_on()` / `dmo_is_on()` 表示设备侧生效开关，
 不代表主机已完成枚举。键盘队列保存绝对状态、满时丢旧保新；鼠标队列合并增量，

@@ -84,6 +84,10 @@ void input_queue_flush(void)
 
         if (kind == INQ_KIND_PAD) {
             ds5_pad_feed_pad(data, len);
+        } else if (kind == INQ_KIND_TOUCH) {
+            ds5_pad_feed_touch(data, len);
+        } else if (kind == INQ_KIND_MOTION) {
+            ds5_pad_feed_motion(data, len);
         }
     }
 

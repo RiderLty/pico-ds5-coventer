@@ -89,7 +89,7 @@ int main(void) {
     assert(lua_store_init() && flash_devices==1); // repeated init retains the live store
     assert(lua_binder_is_ready() && s_image==s_default_image && !s_saved && s_dirty && !s_error[0]);
     unsigned initial_programs=programs, initial_erases=erases;
-    const char good[]="enable_listen_keys(4); function on_key(k,d) seen=k end; marker=42";
+    const char good[]="function on_key(k,d) seen=k end; marker=42";
     upload(good,strlen(good));
     assert(s_image==s_default_image && programs==initial_programs);
     assert(!op(3)); assert(s_size==strlen(good) && !memcmp(s_image,good,s_size) && s_dirty);

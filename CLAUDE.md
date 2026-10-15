@@ -58,8 +58,8 @@ python3 tools/serve_https.py           # 自签 HTTPS（WebHID/Web Serial 需要
 | 主循环 | `tud_task` / `input_queue_flush` / `ds5_pad_tick` / `usb_km_task` / `usb_km_service` / `usb_io_task` / `uart_proto_task` / `lua_script_task` | `tuh_task` / `input_app_task` / `lua_script_process` / `lua_binder_process` |
 | 独占 | 全部 `tud_*`、描述符组装、重枚举 | hidkit 回调、Lua VM、Switch Pro 握手 |
 
-手柄帧经 `input_queue.c` 的 SPSC 队列（`INQ_KIND_PAD`）交给 core0 的 `ds5_pad.c`；
-键鼠有各自队列，脚本命令通过 `lua_script.c` 的有界 mailbox 往返两核。
+手柄/触摸/六轴帧经 `input_queue.c` 的 SPSC 队列（`INQ_KIND_PAD`/`TOUCH`/`MOTION`）
+交给 core0 的 `ds5_pad.c`；键鼠有各自队列，脚本命令通过 `lua_script.c` 的有界 mailbox 往返两核。
 所有 `tud_*` 调用集中在 core0 是为了从结构上消除双核直写
 Device FIFO 的竞态——**不要在 core1 或 Lua 里调 `tud_*` 或改写描述符**。
 
@@ -111,9 +111,9 @@ TX 用，持自旋锁防双核撕裂。
 
 ### Lua 接线（`lua_core.c` / `lua_binder.c` / `input_app.c`）
 
-`lua_binder` 只做**单向事件通知**（C → Lua，无返回值、无拦截语义）。脚本用
-`enable_listen_*` 声明关注的事件，C 侧 bitmap/标志 O(1) 过滤，未监听的事件跳过
-VM。输出由脚本调 C 注册函数（`dkb_*` / `dmo_*` / `ability_enable`）。
+`lua_binder` 只做**单向事件通知**（C → Lua，无返回值、无拦截语义）。hidkit 事件
+全量直投 Lua 回调，无需 `enable_listen_*` 声明。输出由脚本调 C 注册函数
+（`dkb_*` / `dmo_*` / `pad_*` / `ability_enable`）。
 
 - 新增 Lua 函数：在 `input_app.c` 的 `lua_binder_rebind()` 里 `lua_binder_bind()`。
   rebind 在 VM 重建后、脚本加载前调用。
@@ -123,7 +123,8 @@ VM。输出由脚本调 C 注册函数（`dkb_*` / `dmo_*` / `ability_enable`）
   直接在 core0 通讯回调操作 Lua 或写 Flash。
 - 预制脚本：`scripts/default.lua` → `tools/embed_lua.py` → `src/lua_default_script.h`
   （**自动生成，勿手改**；CMake 自动重新生成）。
-- 手柄输入目前是 C 直通（`ds5_pad.c`），不走 Lua；`pad.*` 接口落地后移交脚本。
+- 手柄/触摸/六轴输出由 Lua `pad_*` 函数经 `input_queue` 驱动 `ds5_pad.c`，
+  不再有 C 直通管线。
 
 ## 平台坑（均已实测踩过，勿重蹈）
 

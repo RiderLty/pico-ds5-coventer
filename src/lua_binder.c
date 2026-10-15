@@ -5,10 +5,12 @@
  * 与 mapper 版的差异：
  *   - 无 init()/tick()/on_custom_event/on_boot_button（本工程暂不需要；
  *     mapper 的 process/refresh 及对应 id 缓存一并裁掉）
- *   - 新增手柄绝对状态（on_gamepad_abs）与六轴（on_motion）转发，各配
- *     enable_listen_gamepad / enable_listen_motion 门（手柄报文 125~1000Hz，
- *     未声明监听时零 VM 开销）
+ *   - 新增手柄绝对状态（on_gamepad_abs）与六轴（on_motion）转发
  *   - 计时不需要：无 tick，touchpad 节流是纯逐字节比较
+ *   - **事件全量监听**：不再需要 enable_listen_* 声明 —— hidkit 事件
+ *     一律直投 Lua 回调，C 侧无 bitmap/标志过滤（开销可接受：手柄
+ *     报文 125~1000Hz，Lua pcall 调用本身 ~1µs 量级；未定义的回调
+ *     只需一次整数比较即返回）
  */
 
 #include "lua_binder.h"
@@ -46,92 +48,6 @@ static uint16_t s_tp_last_x[HIDKIT_TOUCHPAD_SLOTS];
 static uint16_t s_tp_last_y[HIDKIT_TOUCHPAD_SLOTS];
 
 //--------------------------------------------------------------------+
-// 事件监听 bitmap（Lua 脚本通过 enable_listen_* / disable_listen_* 增删）
-//--------------------------------------------------------------------+
-
-static uint64_t g_key_listen[4];       // 256-bit, keycode 0x00–0xFF
-static uint8_t  g_mouse_listen;        //   8-bit, mouse button 0–7
-static bool     g_mouse_move_listen;   // 鼠标移动（dx/dy）监听开关
-static bool     g_mouse_wheel_listen;  // 鼠标滚轮（wheel）监听开关
-static uint32_t g_gamepad_listen;      //  32-bit, gamepad btn code 0x00–0x1F
-static bool     g_gamepad_abs_listen;  // 手柄绝对状态监听开关
-static bool     g_motion_listen;       // 六轴监听开关
-
-//--------------------------------------------------------------------+
-// Lua → C: enable_listen_* / disable_listen_*（可在脚本顶层或运行时调用）
-//--------------------------------------------------------------------+
-
-static int _cb_enable_listen_keys(lua_State *L) {
-    int n = lua_gettop(L);
-    for (int i = 1; i <= n; i++) {
-        int k = (int)luaL_checkinteger(L, i);
-        g_key_listen[(k & 0xFF) >> 6] |= (1ULL << (k & 0x3F));
-    }
-    return 0;
-}
-
-// disable_listen_keys(k...)：清除指定键；无参数 → 清空全部
-static int _cb_disable_listen_keys(lua_State *L) {
-    int n = lua_gettop(L);
-    if (n == 0) { memset(g_key_listen, 0, sizeof(g_key_listen)); return 0; }
-    for (int i = 1; i <= n; i++) {
-        int k = (int)luaL_checkinteger(L, i);
-        g_key_listen[(k & 0xFF) >> 6] &= ~(1ULL << (k & 0x3F));
-    }
-    return 0;
-}
-
-static int _cb_enable_listen_mouse_btn(lua_State *L) {
-    int n = lua_gettop(L);
-    for (int i = 1; i <= n; i++) {
-        int b = (int)luaL_checkinteger(L, i);
-        g_mouse_listen |= (1U << (b & 7));
-    }
-    return 0;
-}
-
-// disable_listen_mouse_btn(b...)：清除指定按键；无参数 → 清空全部
-static int _cb_disable_listen_mouse_btn(lua_State *L) {
-    int n = lua_gettop(L);
-    if (n == 0) { g_mouse_listen = 0; return 0; }
-    for (int i = 1; i <= n; i++) {
-        int b = (int)luaL_checkinteger(L, i);
-        g_mouse_listen &= ~(1U << (b & 7));
-    }
-    return 0;
-}
-
-static int _cb_enable_listen_mouse_move(lua_State *L)  { (void)L; g_mouse_move_listen  = true;  return 0; }
-static int _cb_disable_listen_mouse_move(lua_State *L) { (void)L; g_mouse_move_listen  = false; return 0; }
-static int _cb_enable_listen_mouse_wheel(lua_State *L) { (void)L; g_mouse_wheel_listen = true;  return 0; }
-static int _cb_disable_listen_mouse_wheel(lua_State *L){ (void)L; g_mouse_wheel_listen = false; return 0; }
-
-static int _cb_enable_listen_gamepad_btn(lua_State *L) {
-    int n = lua_gettop(L);
-    for (int i = 1; i <= n; i++) {
-        int k = (int)luaL_checkinteger(L, i);
-        g_gamepad_listen |= (1U << (k & 0x1F));
-    }
-    return 0;
-}
-
-// disable_listen_gamepad_btn(k...)：清除指定按键；无参数 → 清空全部
-static int _cb_disable_listen_gamepad_btn(lua_State *L) {
-    int n = lua_gettop(L);
-    if (n == 0) { g_gamepad_listen = 0; return 0; }
-    for (int i = 1; i <= n; i++) {
-        int k = (int)luaL_checkinteger(L, i);
-        g_gamepad_listen &= ~(1U << (k & 0x1F));
-    }
-    return 0;
-}
-
-static int _cb_enable_listen_gamepad(lua_State *L)  { (void)L; g_gamepad_abs_listen = true;  return 0; }
-static int _cb_disable_listen_gamepad(lua_State *L) { (void)L; g_gamepad_abs_listen = false; return 0; }
-static int _cb_enable_listen_motion(lua_State *L)   { (void)L; g_motion_listen     = true;  return 0; }
-static int _cb_disable_listen_motion(lua_State *L)  { (void)L; g_motion_listen     = false; return 0; }
-
-//--------------------------------------------------------------------+
 // 外部 rebind 回调（默认空实现，应用层覆盖 —— 本工程实现在 input_app.c）
 //--------------------------------------------------------------------+
 
@@ -144,32 +60,8 @@ void lua_binder_rebind(void) {}
 
 bool lua_binder_init(const char *script, size_t len) {
     lua_binder_deinit(); // clear cached registry IDs even if the new script fails
-    // 清零 bitmap；创建 VM + 注册内建回调
-    memset(g_key_listen, 0, sizeof(g_key_listen));
-    g_mouse_listen       = 0;
-    g_mouse_move_listen  = false;
-    g_mouse_wheel_listen = false;
-    g_gamepad_listen     = 0;
-    g_gamepad_abs_listen = false;
-    g_motion_listen      = false;
 
     if (!lua_core_init(NULL, 0)) return false;
-
-    // 在脚本加载前注册本模块的自有回调
-    lua_core_register("enable_listen_keys",        _cb_enable_listen_keys);
-    lua_core_register("disable_listen_keys",       _cb_disable_listen_keys);
-    lua_core_register("enable_listen_mouse_btn",   _cb_enable_listen_mouse_btn);
-    lua_core_register("disable_listen_mouse_btn",  _cb_disable_listen_mouse_btn);
-    lua_core_register("enable_listen_mouse_move",  _cb_enable_listen_mouse_move);
-    lua_core_register("disable_listen_mouse_move", _cb_disable_listen_mouse_move);
-    lua_core_register("enable_listen_mouse_wheel", _cb_enable_listen_mouse_wheel);
-    lua_core_register("disable_listen_mouse_wheel",_cb_disable_listen_mouse_wheel);
-    lua_core_register("enable_listen_gamepad_btn", _cb_enable_listen_gamepad_btn);
-    lua_core_register("disable_listen_gamepad_btn",_cb_disable_listen_gamepad_btn);
-    lua_core_register("enable_listen_gamepad",     _cb_enable_listen_gamepad);
-    lua_core_register("disable_listen_gamepad",    _cb_disable_listen_gamepad);
-    lua_core_register("enable_listen_motion",      _cb_enable_listen_motion);
-    lua_core_register("disable_listen_motion",     _cb_disable_listen_motion);
 
     // 应用层绑定 C 函数（print/warn 覆盖、hidkit 信息等）
     lua_binder_rebind();
@@ -207,13 +99,6 @@ void lua_binder_deinit(void) {
     g_lid_on_key = g_lid_on_mouse_btn = g_lid_on_mouse_move = g_lid_on_mouse_wheel = -1;
     g_lid_on_gamepad_btn = g_lid_on_gamepad_abs = g_lid_on_motion = -1;
     g_lid_on_touchpad = g_lid_on_dropped = g_lid_tick = -1;
-    memset(g_key_listen, 0, sizeof(g_key_listen));
-    g_mouse_listen       = 0;
-    g_mouse_move_listen  = false;
-    g_mouse_wheel_listen = false;
-    g_gamepad_listen     = 0;
-    g_gamepad_abs_listen = false;
-    g_motion_listen      = false;
     lua_core_deinit();
 }
 
@@ -230,11 +115,10 @@ bool lua_binder_bind(const char *name, void *func) {
 }
 
 //--------------------------------------------------------------------+
-// C → Lua: 事件转发（入口 bitmap/标志 O(1) 过滤）
+// C → Lua: 事件转发（全量直投，仅检查回调是否存在）
 //--------------------------------------------------------------------+
 
 void lua_binder_on_key(uint8_t keycode, bool down) {
-    if (!(g_key_listen[keycode >> 6] & (1ULL << (keycode & 0x3F)))) return;
     if (g_lid_on_key < 0) return;
 
     lua_core_push_int(keycode);
@@ -243,7 +127,6 @@ void lua_binder_on_key(uint8_t keycode, bool down) {
 }
 
 void lua_binder_on_mouse_btn(uint8_t button, bool down) {
-    if (!(g_mouse_listen & (1U << (button & 7)))) return;
     if (g_lid_on_mouse_btn < 0) return;
 
     lua_core_push_int(button);
@@ -252,7 +135,6 @@ void lua_binder_on_mouse_btn(uint8_t button, bool down) {
 }
 
 void lua_binder_on_mouse_move(int32_t dx, int32_t dy) {
-    if (!g_mouse_move_listen) return;
     if (g_lid_on_mouse_move < 0) return;
 
     lua_core_push_int(dx);
@@ -261,7 +143,6 @@ void lua_binder_on_mouse_move(int32_t dx, int32_t dy) {
 }
 
 void lua_binder_on_mouse_wheel(int32_t wheel) {
-    if (!g_mouse_wheel_listen) return;
     if (g_lid_on_mouse_wheel < 0) return;
 
     lua_core_push_int(wheel);
@@ -269,7 +150,6 @@ void lua_binder_on_mouse_wheel(int32_t wheel) {
 }
 
 void lua_binder_on_gamepad_btn(uint8_t code, bool pressed) {
-    if (!(g_gamepad_listen & (1U << (code & 0x1F)))) return;
     if (g_lid_on_gamepad_btn < 0) return;
 
     lua_core_push_int((int)code);
@@ -280,7 +160,6 @@ void lua_binder_on_gamepad_btn(uint8_t code, bool pressed) {
 void lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                                int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt) {
     (void)slot;
-    if (!g_gamepad_abs_listen) return;
     if (g_lid_on_gamepad_abs < 0) return;
 
     lua_core_push_int(ls_x);
@@ -295,7 +174,6 @@ void lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 void lua_binder_on_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                           int16_t ax, int16_t ay, int16_t az) {
     (void)slot;
-    if (!g_motion_listen) return;
     if (g_lid_on_motion < 0) return;
 
     lua_core_push_int(gx);
