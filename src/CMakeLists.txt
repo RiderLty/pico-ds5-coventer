@@ -6,6 +6,8 @@ target_sources(${target_name} PRIVATE
  usb_descriptors.c
  usb_km.c
  usb_io.c
+ uart_proto.c
+ proto.c
  kbd_hid.c
  kbd_out.c
  mouse_hid.c

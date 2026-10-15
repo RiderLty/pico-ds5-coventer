@@ -97,6 +97,25 @@ IAD 分组、放弃 legacy 音频分组，未覆盖的多接口功能会被拆�
 CDC/NCM 类与 DS5 音频基线在 Windows 上互斥（见 `exp/cdc-serial` 分支的
 探索记录）。HID 单接口不需要 IAD，音频不受影响。
 
+### 传输抽象（proto 通道核心）
+
+协议 v1 的命令层与传输解耦（`src/proto.c`）：通道实例 = 4KB 消息环 + TX
+单飞分块 + RX 重组 + 分发，块格式全传输一致（`[flags][data≤61]`，seq 归
+传输适配器）。两个平级适配器：
+
+- **custom HID**（`usb_io.c`）：块 ↔ 满 63B 报文（seq 前缀 + 补零，短包
+  在 Windows→Chrome 链路上不可靠）；USB 链路可靠，无 CRC
+- **调试串口**（`uart_proto.c`，UART0 4Mbaud，GPIO2/3 + USB-TTL）：帧 =
+  `0xC0 <SLIP 转义([seq][flags][data] + CRC16-CCITT)> 0xC0`（RFC 1055）。
+  RX 为 DMA 环形接收（移植 pico-hid-mapper，零 RX 中断，溢出/错误守护 +
+  50ms 半帧超时）；TX 持 debug 锁与日志文本共写 UART——日志为 ASCII，与
+  帧混流互不干扰（解码器按 0xC0 重同步，垃圾帧被 CRC 淘汰）
+
+路由：PRINT 广播到所有激活传输；请求应答只回请求方传输。网页
+`tools/webhid-test.html` 的 `PicoIO` 消息层对两者无感，`Transport` 抽象
+（HidTransport / SerialTransport）各自处理 seq 与帧封装；串口连接默认
+4000000（适配器须支持，可改）。
+
 ## 主线默认行为
 
 - 上电仅返回 flash 基线，键鼠与 IO 开关均为 false。

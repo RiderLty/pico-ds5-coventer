@@ -23,6 +23,7 @@
 #include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
 #include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（Lua 请求热重载）
 #include "usb_io.h"       // custom IO 通讯接口 echo（ability_enable 第三参动态开关）
+#include "uart_proto.h"   // UART 传输适配器（DMA RX + SLIP 协议帧）
 #include "lua_binder.h"
 #include "lua_default_script.h"   // 预制脚本（CMake 自动 embed，无动态加载）
 
@@ -140,6 +141,7 @@ int main(void) {
     usb_km_task();     // ability_enable 请求轮询，apply 在重枚举窗口内执行
     usb_km_service();  // 键鼠输出队列出队（未启用直接返回）
     usb_io_task();     // IO 通讯接口 echo（未启用直接返回）
+    uart_proto_task(); // UART 传输：DMA RX 解析 + 通道 TX
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
     // 未就绪时由主机 NAK 主导节奏，与真实手柄/DS5Dongle 行为一致

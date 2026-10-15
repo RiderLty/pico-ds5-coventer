@@ -36,4 +36,8 @@ int tu_printf(const char *fmt, ...);
 // 原始字符串输出（线程安全）
 void debug_puts(const char *s);
 
+// 原始字节写（线程安全，持同一把锁）：协议帧与日志文本共用 UART0，
+// 用它保证帧不会被并发日志写撕裂。调用方自行组帧（SLIP 转义）。
+void debug_write_raw(const uint8_t *buf, uint32_t len);
+
 #endif // DS5_DEBUG_H

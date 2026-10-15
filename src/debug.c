@@ -45,7 +45,7 @@ void debug_init(void)
     debug_puts("\n[DS5C] boot\n");
 }
 
-static void write_all(const char *s, uint32_t len)
+static void write_all(const uint8_t *s, uint32_t len)
 {
     uint32_t save = spin_lock_blocking(s_lock);
     uart_write_blocking(DEBUG_UART, (const uint8_t *)s, len);
@@ -55,7 +55,13 @@ static void write_all(const char *s, uint32_t len)
 void debug_puts(const char *s)
 {
     if (!s_lock || !s) return;
-    write_all(s, (uint32_t)strlen(s));
+    write_all((const uint8_t *)s, (uint32_t)strlen(s));
+}
+
+void debug_write_raw(const uint8_t *buf, uint32_t len)
+{
+    if (!s_lock || !buf) return;
+    write_all(buf, len);
 }
 
 void debug_printf(const char *fmt, ...)
@@ -70,7 +76,7 @@ void debug_printf(const char *fmt, ...)
     if (n <= 0) return;
     if (n > (int)sizeof(msg) - 1) n = (int)sizeof(msg) - 1;
 
-    write_all(msg, (uint32_t)n);
+    write_all((const uint8_t *)msg, (uint32_t)n);
 }
 
 int tu_printf(const char *fmt, ...)
@@ -92,6 +98,6 @@ int tu_printf(const char *fmt, ...)
     if (prefix < 0) return 0;
     if (prefix + n >= (int)sizeof(line)) n = (int)sizeof(line) - prefix - 1;
     memcpy(line + prefix, msg, (size_t)n);
-    write_all(line, (uint32_t)(prefix + n));
+    write_all((const uint8_t *)line, (uint32_t)(prefix + n));
     return n;
 }
