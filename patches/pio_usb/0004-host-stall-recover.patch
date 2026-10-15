@@ -1,0 +1,238 @@
+diff --git a/src/pio_usb.h b/src/pio_usb.h
+--- a/src/pio_usb.h
++++ b/src/pio_usb.h
+@@ -16,6 +16,19 @@
+ void pio_usb_host_restart(void);
+ uint32_t pio_usb_host_get_frame_number(void);
+ 
++// ---- 总线静默检测 / 失联自愈（实现见 pio_usb_host.c 顶部说明）----
++// 帧间隔超过 PIO_USB_STALL_RECOVER_US 时库会记录静默事件，并在
++// PIO_USB_STALL_REPROBE_US 复核窗后自动做一次软插拔（拔/插各一帧），借重新
++// 枚举的总线复位唤醒已 suspend 的设备。应用可选：在复核窗内异步探测设备，
++// 若仍正常则调用 pio_usb_host_stall_veto() 取消本次自愈。
++bool pio_usb_host_stall_pending(void);
++void pio_usb_host_stall_veto(void);
++uint32_t pio_usb_host_stall_max_us(void);
++uint32_t pio_usb_host_stall_count(void);
++uint32_t pio_usb_host_recover_count(void);
++// 立即对某个 root 口做一次软插拔（拔/插各一帧）
++void pio_usb_host_port_force_reconnect(uint8_t root_idx);
++
+ // Call this every 1ms when skip_alarm_pool is true.
+ void pio_usb_host_frame(void);
+ 
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -29,6 +29,46 @@
+ static volatile bool start_timer_flag;
+ static __unused uint32_t int_stat;
+ 
++//--------------------------------------------------------------------+
++// 总线静默检测 / 失联自愈
++//
++// 背景：主机被长时间冻结（例如写 flash 时的 multicore_lockout）期间没有 SOF，
++// USB 设备在 3ms 无总线活动后进入 suspend；本栈不实现 resume，设备就此不再
++// 应答，而上层仍认为设备挂载 → 端口永久失效（拔插也检测不到），只能重启。
++//
++// 做法：SOF 定时器回调是"帧起点"，在其中测量两次回调的间隔即为**真实无 SOF
++// 时长**。超过阈值即认为设备可能已 suspend：先留一个复核窗（应用可异步探测
++// 后否决），随后做一次"软插拔"——拔与插各占一帧，靠重新枚举时的总线复位把
++// 设备唤醒。全部是库内状态操作，不依赖 TinyUSB，裸机用法同样生效。
++//
++// 配置：把对应宏定义在编译器命令行即可覆盖（默认值见下）。
++//--------------------------------------------------------------------+
++
++#ifndef PIO_USB_STALL_RECOVER_US
++#define PIO_USB_STALL_RECOVER_US 2500u          // 触发阈值(us)；0 = 关闭（零开销）
++#endif
++#ifndef PIO_USB_STALL_REPROBE_US
++#define PIO_USB_STALL_REPROBE_US 20000u         // 检测到 → 软插拔之间的复核窗(us)
++#endif
++#ifndef PIO_USB_HEAL_CONNECT_US
++#define PIO_USB_HEAL_CONNECT_US 2000u           // 软插拔"拔"与"插"之间的间隔(us)
++#endif
++#ifndef PIO_USB_STALL_MIN_INTERVAL_US
++#define PIO_USB_STALL_MIN_INTERVAL_US 2000000u  // 自愈速率限制(us)
++#endif
++
++static uint32_t last_sof_us;
++static volatile uint32_t stall_max_us;    // 本次运行最长静默(us)
++static volatile uint32_t stall_count;     // 超阈值静默次数
++static volatile uint32_t recover_count;   // 实际软插拔次数
++static volatile uint32_t stall_at_us;
++static volatile uint32_t last_heal_us;
++static volatile uint32_t heal_connect_at_us;
++static volatile bool stall_pending;
++static volatile bool stall_vetoed;
++static volatile uint8_t stall_mask;
++static volatile bool heal_waiting_connect;
++
+ static bool sof_timer(repeating_timer_t *_rt);
+ 
+ //--------------------------------------------------------------------+
+@@ -45,6 +85,8 @@
+                                       &sof_rt);
+   }
+ 
++  // 静默测量基准：首个回调不应被误判为一次长静默
++  last_sof_us = timer_hw->timerawl;
+   timer_active = true;
+ }
+ 
+@@ -309,7 +351,11 @@
+   // check for new connection to root hub
+   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+     root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+-    if (root->initialized && !root->connected) {
++    // A synthetic detach must reach the HCD before any new attach event.
++    // In particular, do not let line-state probing combine both bits in one IRQ.
++    if (root->initialized && !root->connected &&
++        !(root->ints & PIO_USB_INTS_DISCONNECT_BITS) &&
++        !(heal_waiting_connect && (stall_mask & (uint8_t)(1u << root_idx)))) {
+       port_pin_status_t const line_state = pio_usb_bus_get_line_state(root);
+       if (line_state == PORT_PIN_FS_IDLE || line_state == PORT_PIN_LS_IDLE) {
+         root->is_fullspeed = (line_state == PORT_PIN_FS_IDLE);
+@@ -338,7 +384,82 @@
+ static bool __no_inline_not_in_flash_func(sof_timer)(repeating_timer_t *_rt) {
+   (void)_rt;
+ 
++  uint32_t const now = timer_hw->timerawl;
++  uint32_t const gap = now - last_sof_us;   // 真实无 SOF 时长
++  last_sof_us = now;
++
++  if (PIO_USB_STALL_RECOVER_US && gap >= (uint32_t)PIO_USB_STALL_RECOVER_US) {
++    if (gap > stall_max_us) {
++      stall_max_us = gap;
++    }
++    stall_count++;
++    if (!stall_pending && !heal_waiting_connect &&
++        (uint32_t)(now - last_heal_us) >=
++            (uint32_t)PIO_USB_STALL_MIN_INTERVAL_US) {
++      uint8_t mask = 0;
++      for (int r = 0; r < PIO_USB_ROOT_PORT_CNT; r++) {
++        root_port_t *root = PIO_USB_ROOT_PORT(r);
++        if (root->initialized && root->connected && !root->suspended) {
++          mask |= (uint8_t)(1u << r);
++        }
++      }
++      if (mask) {
++        stall_mask = mask;
++        stall_pending = true;
++        stall_vetoed = false;
++        stall_at_us = now;
++      }
++    }
++  }
++
+   pio_usb_host_frame();
++
++  if (stall_pending &&
++      (uint32_t)(now - stall_at_us) >= (uint32_t)PIO_USB_STALL_REPROBE_US) {
++    // 复核窗已过且未被否决 → 阶段1：制造一次"拔出"（上层会走 umount）
++    if (!stall_vetoed) {
++      for (int r = 0; r < PIO_USB_ROOT_PORT_CNT; r++) {
++        if (stall_mask & (uint8_t)(1u << r)) {
++          root_port_t *root = PIO_USB_ROOT_PORT(r);
++          root->connected = false;
++          root->suspended = true;
++          root->ints |= PIO_USB_INTS_DISCONNECT_BITS;
++          // Stop queued transfers just as for a physical detach.
++          for (int e = 0; e < PIO_USB_EP_POOL_CNT; e++) {
++            endpoint_t *ep = PIO_USB_ENDPOINT(e);
++            if (ep->root_idx == r && ep->size && ep->has_transfer) {
++              pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
++            }
++          }
++        }
++      }
++      heal_waiting_connect = true;
++      heal_connect_at_us = now;
++      recover_count++;
++      last_heal_us = now;
++    }
++    stall_pending = false;
++    stall_vetoed = false;
++  } else if (heal_waiting_connect &&
++             (uint32_t)(now - heal_connect_at_us) >=
++                 (uint32_t)PIO_USB_HEAL_CONNECT_US) {
++    // 阶段2：设备仍在线才重新插入；更新 connected 防止下一帧重复上报。
++    // 枚举第一步的总线复位(SE0 >= 10ms)会唤醒 suspend 的设备。
++    for (int r = 0; r < PIO_USB_ROOT_PORT_CNT; r++) {
++      if (stall_mask & (uint8_t)(1u << r)) {
++        root_port_t *root = PIO_USB_ROOT_PORT(r);
++        port_pin_status_t const line_state = pio_usb_bus_get_line_state(root);
++        if (line_state == PORT_PIN_FS_IDLE || line_state == PORT_PIN_LS_IDLE) {
++          root->is_fullspeed = (line_state == PORT_PIN_FS_IDLE);
++          root->connected = true;
++          root->suspended = true; // resume only after enumeration's bus reset
++          root->ints |= PIO_USB_INTS_CONNECT_BITS;
++        }
++      }
++    }
++    heal_waiting_connect = false;
++    stall_mask = 0;
++  }
+ 
+   return true;
+ }
+@@ -349,6 +470,59 @@
+ 
+ uint32_t pio_usb_host_get_frame_number(void) {
+   return sof_count;
++}
++
++//--------------------------------------------------------------------+
++// 总线静默自愈：对外状态
++//--------------------------------------------------------------------+
++
++bool pio_usb_host_stall_pending(void) {
++  return stall_pending;
++}
++
++void pio_usb_host_stall_veto(void) {
++  // 应用在复核窗内确认设备仍正常（例如异步控制传输已成功）→ 取消本次自愈。
++  // 只写一个 volatile 标志，可在任意上下文调用。
++  stall_vetoed = true;
++}
++
++uint32_t pio_usb_host_stall_max_us(void) {
++  return stall_max_us;
++}
++
++uint32_t pio_usb_host_stall_count(void) {
++  return stall_count;
++}
++
++uint32_t pio_usb_host_recover_count(void) {
++  return recover_count;
++}
++
++void pio_usb_host_port_force_reconnect(uint8_t root_idx) {
++  if (root_idx >= PIO_USB_ROOT_PORT_CNT) {
++    return;
++  }
++  root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
++  if (!root->initialized) {
++    return;
++  }
++  uint32_t const irq_state = save_and_disable_interrupts();
++  root->connected = false;
++  root->suspended = true;
++  root->ints &= ~PIO_USB_INTS_CONNECT_BITS;
++  root->ints |= PIO_USB_INTS_DISCONNECT_BITS;
++  for (int e = 0; e < PIO_USB_EP_POOL_CNT; e++) {
++    endpoint_t *ep = PIO_USB_ENDPOINT(e);
++    if (ep->root_idx == root_idx && ep->size && ep->has_transfer) {
++      pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
++    }
++  }
++  stall_pending = false;
++  // 复用自愈机制：隔 PIO_USB_HEAL_CONNECT_US 后强制重新枚举
++  stall_mask |= (uint8_t)(1u << root_idx);
++  heal_waiting_connect = true;
++  heal_connect_at_us = timer_hw->timerawl;
++  restore_interrupts(irq_state);
+ }
+ 
+ void pio_usb_host_port_reset_start(uint8_t root_idx) {

@@ -27,6 +27,66 @@ if(Git_FOUND)
     endif()
 endif()
 
+# PIO-USB root-port hotplug recovery is validated against the pre-0.6.0
+# receive implementation. The patch script pins that baseline and applies
+# the host stall recovery plus Pico SDK 2 compatibility fixes.
+if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/lib/pico_pio_usb/src/pio_usb.h")
+    message(FATAL_ERROR "lib/pico_pio_usb is missing; run ./scripts/setup-sdk.sh")
+endif()
+file(READ "${CMAKE_CURRENT_LIST_DIR}/lib/pico_pio_usb/src/pio_usb.h" PIO_USB_HEADER)
+string(FIND "${PIO_USB_HEADER}" "pio_usb_host_task" PIO_USB_LEGACY_API)
+if(PIO_USB_LEGACY_API EQUAL -1)
+    message(FATAL_ERROR "PIO-USB must use the pre-0.6.0 hotplug baseline; run ./scripts/apply-patches.sh")
+endif()
+file(READ "${CMAKE_CURRENT_LIST_DIR}/lib/pico_pio_usb/src/pio_usb_host.c" PIO_USB_HOST_SOURCE)
+string(FIND "${PIO_USB_HOST_SOURCE}" "pio_usb_host_stall_pending" PIO_USB_STALL_RECOVERY)
+if(PIO_USB_STALL_RECOVERY EQUAL -1)
+    message(FATAL_ERROR "PIO-USB host recovery patch is missing; run ./scripts/apply-patches.sh")
+endif()
+
+# TinyUSB 0.18 can permanently stop hub change polling after one failed
+# transaction. Carry the upstream 0.19 retry behavior in a build copy so the
+# pinned SDK source remains untouched.
+set(_hub_source "${PICO_TINYUSB_PATH}/src/host/hub.c")
+if(EXISTS "${_hub_source}")
+    file(READ "${_hub_source}" _hub_text)
+    string(FIND "${_hub_text}" "TU_VERIFY(result == XFER_RESULT_SUCCESS);" _hub_failure_check)
+    if(NOT _hub_failure_check EQUAL -1)
+        string(REPLACE
+            "  TU_VERIFY(result == XFER_RESULT_SUCCESS);"
+            "  if (result != XFER_RESULT_SUCCESS) {\n    hub_edpt_status_xfer(daddr);\n    return true;\n  }"
+            _hub_text "${_hub_text}")
+        string(REPLACE
+            "  TU_ASSERT(xfer->result == XFER_RESULT_SUCCESS, );"
+            "  if (xfer->result != XFER_RESULT_SUCCESS) {\n    hub_edpt_status_xfer(xfer->daddr);\n    return;\n  }"
+            _hub_text "${_hub_text}")
+
+        set(_hub_patched "${CMAKE_BINARY_DIR}/tusb_patch/hub.c")
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tusb_patch")
+        file(WRITE "${_hub_patched}" "${_hub_text}")
+        get_target_property(_tuh_sources tinyusb_host_base INTERFACE_SOURCES)
+        set(_tuh_sources_patched "")
+        set(_hub_replaced FALSE)
+        foreach(_source IN LISTS _tuh_sources)
+            if(_source MATCHES "src/host/hub\\.c$")
+                list(APPEND _tuh_sources_patched "${_hub_patched}")
+                set(_hub_replaced TRUE)
+            else()
+                list(APPEND _tuh_sources_patched "${_source}")
+            endif()
+        endforeach()
+        if(_hub_replaced)
+            set_target_properties(tinyusb_host_base PROPERTIES INTERFACE_SOURCES "${_tuh_sources_patched}")
+            target_include_directories(tinyusb_host_base INTERFACE "${PICO_TINYUSB_PATH}/src/host")
+            message(STATUS "TinyUSB hub failure retry patch applied")
+        else()
+            message(FATAL_ERROR "TinyUSB hub.c was found but not in tinyusb_host_base sources")
+        endif()
+    else()
+        message(STATUS "TinyUSB hub driver already includes failure retries")
+    endif()
+endif()
+
 # ── hidkit 解析库（HID/XInput 语义解析）与适配器：git 子模块 ──────────────
 #   lib/hidkit                  —— 纯 C、零平台依赖的解析 core（不碰 USB 栈，只吃
 #                                  描述符与报文，吐标准事件；src/input_app.c 是接线层）

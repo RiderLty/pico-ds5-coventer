@@ -1,0 +1,48 @@
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -553,6 +553,9 @@
+ bool pio_usb_host_endpoint_open(uint8_t root_idx, uint8_t device_address,
+                                 uint8_t const *desc_endpoint, bool need_pre) {
+   const endpoint_descriptor_t *d = (const endpoint_descriptor_t *)desc_endpoint;
++  if (NULL != _find_ep(root_idx, device_address, d->epaddr)) {
++    return true; // already opened
++  }
+   for (int ep_pool_idx = 0; ep_pool_idx < PIO_USB_EP_POOL_CNT; ep_pool_idx++) {
+     endpoint_t *ep = PIO_USB_ENDPOINT(ep_pool_idx);
+     // ep size is used as valid indicator
+@@ -567,6 +570,22 @@
+   }
+ 
+   return false;
++}
++
++// TinyUSB's current HCD contract closes individual endpoints as well as devices.
++bool pio_usb_host_endpoint_close(uint8_t root_idx, uint8_t device_address,
++                                 uint8_t ep_address) {
++  endpoint_t *ep = _find_ep(root_idx, device_address, ep_address);
++  if (!ep) {
++    return false;
++  }
++
++  // Called on the host core; the SOF IRQ must not race endpoint retirement.
++  uint32_t const irq_state = save_and_disable_interrupts();
++  ep->size = 0;
++  ep->has_transfer = false;
++  restore_interrupts(irq_state);
++  return true;
+ }
+ 
+ bool pio_usb_host_send_setup(uint8_t root_idx, uint8_t device_address,
+diff --git a/src/pio_usb_ll.h b/src/pio_usb_ll.h
+--- a/src/pio_usb_ll.h
++++ b/src/pio_usb_ll.h
+@@ -169,6 +169,8 @@
+ 
+ bool pio_usb_host_endpoint_open(uint8_t root_idx, uint8_t device_address,
+                                 uint8_t const *desc_endpoint, bool need_pre);
++bool pio_usb_host_endpoint_close(uint8_t root_idx, uint8_t device_address,
++                                 uint8_t ep_address);
+ bool pio_usb_host_send_setup(uint8_t root_idx, uint8_t device_address,
+                              uint8_t const setup_packet[8]);
+ bool pio_usb_host_endpoint_transfer(uint8_t root_idx, uint8_t device_address,

@@ -1,0 +1,22 @@
+diff --git a/src/pio_usb_device.c b/src/pio_usb_device.c
+index 119f473..f54dfcf 100644
+--- a/src/pio_usb_device.c
++++ b/src/pio_usb_device.c
+@@ -367,6 +367,17 @@ void pio_usb_device_task(void) {
+       pio_port_t *pp = PIO_USB_PIO_PORT(0);
+       restart_usb_reveiver(pp);
+     }
++
++    // 防止 SE0 持续（宿主断开 / 异常总线状态）时永久自旋阻塞 USB 任务：
++    // 一旦卡在这里就再也不会返回主循环，上层任务全部停摆（表现为复位）。
++    // USB 复位最长约 10ms，这里 20ms 上限足够覆盖正常复位，超出则跳出，
++    // 把控制权还给主循环，下一轮任务再继续检测。
++    // 该上限针对同一现象做过真机验证；
++    // 本仓库的 device 模式不走 pio-usb，保留这枚补丁是为了与上游子模块
++    // 的状态保持一致。
++    if (se0_time_us >= 20000) {
++      break;
++    }
+   }
+ }
+ 

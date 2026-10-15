@@ -120,7 +120,7 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
 | `lib/pico-sdk` | 2.3.0 | 内嵌 TinyUSB 切到 `2d56dc53` 以支持 UAC1 |
-| `lib/pico_pio_usb` | `675543bc` | TinyUSB 官方配对版本（0.7.2） |
+| `lib/pico_pio_usb` | `9510f795` + 本地补丁 | 保留 Hub 热插拔可靠性的 host 基线 |
 | `lib/hidkit` | v0.3.1 | HID/XInput 语义解析 |
 | `lib/hidkit-tusb-xinput` | `4fffdf3` | XInput 类驱动 |
 | `lib/hidkit-tusb-switch-pro` | `db5dc8a` | Switch Pro USB 握手库 |
@@ -155,9 +155,14 @@ CMake 会缓存调试级别，复用已有构建目录时请显式传入所需�
 
 ### PIO-USB 版本说明
 
-本仓库使用配对的 PIO-USB 0.7.2；设备端为原生 USB，不采用 mapper 旧版 PIO-USB
-的 device SE0 补丁。当前不写运行期 flash；将来若加入 KV 存储，需要另行评估
-写 flash 导致 Host 静默的问题。TinyUSB hub 驱动韧性修复已包含于固定 commit。
+PIO-USB 固定在 `pico-hid-mapper` 验证过 Hub 热插拔的旧版基线 `9510f795`，并通过
+`patches/pio_usb/` 应用 Pico SDK 2 兼容、device SE0 超时、TinyUSB endpoint API
+兼容和 Host 总线静默自愈补丁。运行 `./scripts/setup-sdk.sh` 会自动应用；可用
+`./scripts/apply-patches.sh --status` 检查基线及补丁状态。Host 在总线静默超过
+`PIO_USB_STALL_RECOVER_US`（默认 2500 微秒）后执行软拔插恢复，设为 0 可关闭。
+当前不写运行期 flash；将来若加入 KV 存储，需要另行评估写 flash 导致 Host 静默的问题。
+固定版 TinyUSB hub 驱动也会在传输失败后重试状态轮询。
+这一旧基线不支持经 Hub 连接低速（LS）设备；部分键盘、鼠标会受影响。
 
 ## 烧录与验证
 

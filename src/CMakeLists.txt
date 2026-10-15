@@ -53,6 +53,12 @@ target_compile_options(${target_name} PRIVATE
   -DCFG_TUSB_DEBUG=${TUSB_DEBUG_LEVEL}
 )
 
+# Silence recovery threshold inherited from pico-hid-mapper's host fix.
+set(PIO_USB_STALL_RECOVER_US 2500 CACHE STRING "PIO-USB host silence recovery threshold (us), 0 disables")
+target_compile_definitions(${target_name} PRIVATE
+  PIO_USB_STALL_RECOVER_US=${PIO_USB_STALL_RECOVER_US}
+)
+
 # ── hidkit 解析库（INTERFACE 库，源码编进本 target）────────────────────────
 # 容量：转换器场景单槽位足够；HIDKIT_HOT 把库内每报文热路径放进 RAM ——
 # 宿主侧 hidkit_input_* 出口已在 input_app.c 同样标注，整条输入链才真正不停摆
