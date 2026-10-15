@@ -1,2 +1,5 @@
 build/
 build-*/
+
+# 自签 HTTPS 证书（serve_https.py 生成）
+tools/serve_https*.pem

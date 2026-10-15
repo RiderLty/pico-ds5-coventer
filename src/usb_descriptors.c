@@ -18,7 +18,11 @@
 // Device Descriptor
 //--------------------------------------------------------------------
 
-tusb_desc_device_t const desc_device = {
+// Windows 按 VID/PID/bcdDevice 缓存 OS 描述符。每种接口布局用独立的
+// BCD 修订号，避免首次基线枚举与后续 IO 枚举、不同 IO 接口号共用缓存。
+#define DEVICE_REV_BASE 0x0120u
+
+static tusb_desc_device_t desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = 0x0200,
@@ -28,7 +32,7 @@ tusb_desc_device_t const desc_device = {
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = 0x054C,   // Sony
     .idProduct          = 0x0CE6,   // DualSense Wireless Controller
-    .bcdDevice          = 0x0100,
+    .bcdDevice          = DEVICE_REV_BASE,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x00,
@@ -203,10 +207,11 @@ enum {
 
 // 追加块 = TUD_HID_DESCRIPTOR 展开：接口 9 + HID 9 + 端点 7 = 25 字节
 #define KM_ITF_DESC_LEN   25u
-// IO 追加块 = TUD_HID_INOUT_DESCRIPTOR 展开：接口 9 + HID 9 + EP OUT 7 +
-// EP IN 7 = 32 字节（单接口双中断端点，无 IAD —— usbccgp 保持 legacy 分组，
-// 音频不受影响；CDC/NCM 等带 IAD 的类与 DS5 音频基线在 Windows 上互斥）
-#define IO_ITF_DESC_LEN   32u
+// IO 追加块 = TUD_VENDOR_DESCRIPTOR 展开：接口 9 + EP OUT 7 + EP IN 7 =
+// 23 字节（class 0xFF 单接口双 bulk，无 IAD —— usbccgp 保持 legacy 分组，
+// 音频不受影响；CDC/NCM 等带 IAD 的类与 DS5 音频基线在 Windows 上互斥）。
+// Windows 侧经 MS OS 1.0 描述符（CompatibleID="WINUSB"）自动绑定 winusb.sys
+#define IO_ITF_DESC_LEN   23u
 #define KM_DESC_MAX       (CONFIG_TOTAL_LEN + 2u * KM_ITF_DESC_LEN + IO_ITF_DESC_LEN)
 
 // 键盘/鼠标端点（与 DS5 的 0x84 IN/0x03 OUT、音频的 0x82 IN/0x01 OUT 无冲突）
@@ -215,18 +220,15 @@ enum {
 #define EPNUM_KBD_IN      0x87
 #define EPNUM_KBD_SIZE    16u   // NKRO：1B Report ID + 1B 修饰键 + 14B 位图
 
-// IO 端点：notif 风格的成对中断端点，IN/OUT 方向独立
+// IO 端点：bulk 端点对（WinUSB，全速 64B）
 #define EPNUM_IO_IN       0x88
 #define EPNUM_IO_OUT      0x08
-#define EPNUM_IO_SIZE     64u   // 报文 = 1B Report ID + 63B payload
-#define EPNUM_IO_INTERVAL 1u
-// IO 报告描述符长度（数组定义见下方 HID Report Descriptor 一节）
-#define IO_HID_REPORT_DESC_LEN 38u
+#define EPNUM_IO_SIZE     64u
 
 // 接口描述符里 bInterfaceNumber 的位置（追加块内偏移 2）
 #define KM_ITF_BNUM_OFFSET      2u
 _Static_assert(KM_ITF_DESC_LEN == 25u, "TUD_HID_DESCRIPTOR 展开长度变化，偏移需重算");
-_Static_assert(IO_ITF_DESC_LEN == 32u, "TUD_HID_INOUT_DESCRIPTOR 展开长度变化，偏移需重算");
+_Static_assert(IO_ITF_DESC_LEN == 23u, "TUD_VENDOR_DESCRIPTOR 展开长度变化，偏移需重算");
 
 // 鼠标接口块：HID 类、协议 None（**不能用 boot 协议**——boot 鼠标只有 3 字节
 // 报文格式，与本项目的 6 字节 16bit 轴不符）
@@ -240,11 +242,10 @@ static uint8_t const desc_itf_kbd[] = {
                        EPNUM_KBD_IN, EPNUM_KBD_SIZE, 1),
 };
 
-// Custom IO 通讯接口块：vendor usage page，协议 None（非 boot 集合，WebHID
-// 可直接打开）。Report ID 1 = 设备→主机 IN，ID 2 = 主机→设备 OUT。
+// WinUSB 通讯接口块：vendor 类（0xFF）、协议 None（非 boot 集合）。SLIP 帧
+// 流，见 usb_io.c
 static uint8_t const desc_itf_io[] = {
-    TUD_HID_INOUT_DESCRIPTOR(6, STRID_IO, HID_ITF_PROTOCOL_NONE, IO_HID_REPORT_DESC_LEN,
-                             EPNUM_IO_OUT, EPNUM_IO_IN, EPNUM_IO_SIZE, EPNUM_IO_INTERVAL),
+    TUD_VENDOR_DESCRIPTOR(6, STRID_IO, EPNUM_IO_OUT, EPNUM_IO_IN, EPNUM_IO_SIZE),
 };
 
 _Static_assert(sizeof(desc_itf_mouse) == KM_ITF_DESC_LEN &&
@@ -293,6 +294,10 @@ void usb_km_apply(bool mouse, bool kbd, bool io)
     s_cfg_desc_ram[4] = itf_count;
 
     s_cfg_desc_len = len;
+    desc_device.bcdDevice = (uint16_t)(DEVICE_REV_BASE |
+        (kbd ? USB_KM_BIT_KBD : 0u) |
+        (mouse ? USB_KM_BIT_MOUSE : 0u) |
+        (io ? USB_KM_BIT_IO : 0u));
 
     // 自检：三项都不追加时，RAM 副本必须与 flash 基线逐字节一致，
     // 否则说明基线构造/回填有偏差，会静默改变主机看到的接口布局
@@ -479,47 +484,16 @@ uint8_t const desc_hid_report_ds[] = {
 _Static_assert(sizeof(desc_hid_report_ds) == HID_REPORT_DESC_LEN,
                "HID report descriptor length mismatch");
 
-//--------------------------------------------------------------------
-// IO 通讯接口 Report Descriptor（vendor usage page，38 字节）
-// 单 Application collection：Report ID 1 = 设备→主机 63B input，
-// Report ID 2 = 主机→设备 63B output。非 boot 集合，WebHID 可直接打开。
-//--------------------------------------------------------------------
-uint8_t const desc_hid_report_io[] = {
-    0x06, 0x00, 0xFF,       // Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x01,             // Usage 0x01
-    0xA1, 0x01,             // Collection (Application)
-    0x85, 0x01,             //   Report ID (1)
-    0x09, 0x01,             //   Usage 0x01
-    0x95, 0x3F,             //   Report Count (63)
-    0x75, 0x08,             //   Report Size (8)
-    0x15, 0x00,             //   Logical Minimum (0)
-    0x26, 0xFF, 0x00,       //   Logical Maximum (255)
-    0x81, 0x02,             //   Input (Data, Var, Abs)
-    0x85, 0x02,             //   Report ID (2)
-    0x09, 0x02,             //   Usage 0x02
-    0x95, 0x3F,             //   Report Count (63)
-    0x75, 0x08,             //   Report Size (8)
-    0x15, 0x00,             //   Logical Minimum (0)
-    0x26, 0xFF, 0x00,       //   Logical Maximum (255)
-    0x91, 0x02,             //   Output (Data, Var, Abs)
-    0xC0,                   // End Collection
-};
-
-_Static_assert(sizeof(desc_hid_report_io) == IO_HID_REPORT_DESC_LEN,
-               "IO 报告描述符长度与 IO_HID_REPORT_DESC_LEN 不一致");
-
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf)
 {
     // 按 TinyUSB HID 实例号分发（实例按配置描述符里接口出现顺序分配：
-    // DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无，IO 紧随键盘，见 usb_km.c）
+    // DS5=0，鼠标（启用时）=1，键盘 = 1 + 鼠标有无，见 usb_km.c。
+    // IO 通讯接口是 vendor 类（WinUSB），不走 HID 报告描述符）
     if (usb_km_mouse_enabled() && itf == MOUSE_HID_INSTANCE) {
         return mouse_hid_report_desc();
     }
     if (kbd_hid_enabled() && itf == kbd_hid_instance()) {
         return kbd_hid_report_desc();
-    }
-    if (usb_io_enabled() && itf == usb_io_instance()) {
-        return desc_hid_report_io;
     }
     return desc_hid_report_ds;
 }
@@ -534,7 +508,83 @@ static char const *string_desc_arr[] = {
     "DualSense Wireless Controller",  // 2: Product
     "Mouse",                          // 3: 16bit 鼠标接口（仅启用时引用）
     "Keyboard",                       // 4: NKRO 键盘接口（仅启用时引用）
+    "Pico WinUSB",                    // 5: WinUSB 通讯接口（仅启用时引用）
 };
+
+// MS OS 1.0：0xEE 字符串（规范 18 字节）= bLength/bType + "MSFT100" UTF-16
+// （14B）+ bMS_VendorCode（1B）+ bPadding（1B）。Windows 据此发起 Compat ID
+// 拉取（tud_vendor_control_xfer_cb 应答）。
+#define MS_OS_VENDOR_CODE 0x21u
+
+static uint8_t const desc_str_msos[18] __attribute__((aligned(2))) = {
+    18, 0x03,
+    'M', 0x00, 'S', 0x00, 'F', 0x00, 'T', 0x00,
+    '1', 0x00, '0', 0x00, '0', 0x00,
+    MS_OS_VENDOR_CODE, 0x00,
+};
+
+static uint8_t const *desc_string_ms_os_10(void)
+{
+    return desc_str_msos;
+}
+
+// MS OS 1.0 Extended Compat ID：未启用 IO 时返回合法的 16B 空表；
+// 启用时追加 24B 功能段，接口号为 4+鼠标+键盘。
+static uint8_t desc_ms_compat_id[40];
+
+static uint8_t winusb_interface_number(void)
+{
+    return (uint8_t)(4u + (usb_km_mouse_enabled() ? 1u : 0u) +
+                         (usb_km_kbd_enabled() ? 1u : 0u));
+}
+
+static uint8_t const *desc_ms_compat_id_get(void)
+{
+    bool io = usb_km_io_enabled();
+    memset(desc_ms_compat_id, 0, sizeof desc_ms_compat_id);
+    uint32_t len = io ? sizeof desc_ms_compat_id : 16u;
+    memcpy(desc_ms_compat_id + 0, &len, 4);            // dwLength = 16 或 40
+    desc_ms_compat_id[4] = 0x00; desc_ms_compat_id[5] = 0x01;   // bcdVersion 1.0
+    desc_ms_compat_id[6] = 0x04; desc_ms_compat_id[7] = 0x00;   // wIndex = 4
+    desc_ms_compat_id[8] = io ? 1u : 0u;               // bCount
+    // [9..15] 保留 0
+    if (io) {
+        desc_ms_compat_id[16] = winusb_interface_number();
+        desc_ms_compat_id[17] = 0x01;  // 功能段首个 RESERVED 字段必须为 1
+        memcpy(desc_ms_compat_id + 18, "WINUSB", 6);
+    }
+    // [26..39] subCompatibleID[8] + reserved[6]，保留 0
+    return desc_ms_compat_id;
+}
+
+// Extended Properties：让 WinUSB/浏览器通过 GUID 发现通讯接口。
+// REG_MULTI_SZ 数据包含字符串终止符和列表终止符（两个 UTF-16 NUL）。
+static struct TU_ATTR_PACKED {
+    uint32_t length;
+    uint16_t version;
+    uint16_t index;
+    uint16_t count;
+    uint32_t property_size;
+    uint32_t property_type;
+    uint16_t name_length;
+    uint16_t name[21];
+    uint32_t data_length;
+    uint16_t data[40];
+} const desc_ms_properties = {
+    .length = 146,
+    .version = 0x0100,
+    .index = 0x0005,
+    .count = 1,
+    .property_size = 136,
+    .property_type = 7,  // REG_MULTI_SZ
+    .name_length = 42,
+    .name = u"DeviceInterfaceGUIDs",
+    .data_length = 80,
+    .data = u"{56D3BAC2-F5C4-43BE-A690-71B61199C15E}\0",
+};
+
+_Static_assert(sizeof(desc_ms_properties) == 146u,
+               "MS OS Extended Properties descriptor length mismatch");
 
 static uint16_t _desc_str[60 + 1];
 
@@ -548,6 +598,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
             memcpy(&_desc_str[1], string_desc_arr[0], 2);
             chr_count = 1;
             break;
+
+        case 0xEE:   // 首次基线枚举也必须应答，避免 osvc=0000 负缓存
+            return (uint16_t const *)desc_string_ms_os_10();
 
         default:
             if (index >= sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) {
@@ -605,15 +658,6 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type,
                                uint8_t *buffer, uint16_t reqlen)
 {
-    // IO 实例：GET_REPORT 返回零数据兜底（WebHID 走中断端点，控制路径少用）
-    if (usb_io_enabled() && itf == usb_io_instance()) {
-        if (report_type == HID_REPORT_TYPE_INPUT && reqlen >= 1u) {
-            memset(buffer, 0, reqlen);
-            return reqlen;
-        }
-        return 0;
-    }
-
     // 仅 DS5 实例（instance 0）处理；键盘/鼠标实例的 GET_REPORT 无需应答
     if (itf != 0) return 0;
 
@@ -642,20 +686,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            hid_report_type_t report_type,
                            uint8_t const *buffer, uint16_t bufsize)
 {
-    // IO 实例：OUT 端点数据由驱动原样转发 —— buffer[0] 是 Report ID，
-    // payload 从 buffer+1 开始（协议块，usb_io_rx 重组分发）；控制
-    // SET_REPORT 路径的 ID 在 report_id 参数里、buffer 已剥离。
-    if (usb_io_enabled() && itf == usb_io_instance()) {
-        if (report_type == HID_REPORT_TYPE_OUTPUT) {
-            if (report_id == 0 && bufsize >= 1u) {
-                usb_io_rx(buffer + 1, (uint16_t)(bufsize - 1u));
-            } else if (report_id == IO_REPORT_ID_OUT && bufsize >= 1u) {
-                usb_io_rx(buffer, bufsize);
-            }
-        }
-        return;
-    }
-
     // NKRO 键盘实例：主机写回 LED 状态（Report ID 1 的 output 报告，
     // bit0-4 = Num/Caps/Scroll/Compose/Kana）
     if (kbd_hid_enabled() && itf == kbd_hid_instance()) {
@@ -669,4 +699,48 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
     (void)report_type;
     (void)buffer;
     (void)bufsize;
+}
+
+//--------------------------------------------------------------------
+// MS OS 1.0：Windows 读取 0xEE 字符串获得 vendor code 后，以
+// (vendor, device) 控制请求拉取描述符（usbd 把所有 vendor 请求路由到
+// 本回调）。wIndex=4 → Extended Compat ID（"WINUSB"）；
+// wIndex=5 → IO 接口的 Extended Properties（DeviceInterfaceGUIDs）。
+//--------------------------------------------------------------------
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
+                                tusb_control_request_t const *request)
+{
+    if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR ||
+        request->bmRequestType_bit.direction != TUSB_DIR_IN) {
+        return false;   // 非本用途的 vendor 请求：STALL
+    }
+
+    if (request->bRequest != MS_OS_VENDOR_CODE) return false;
+
+    if (stage == CONTROL_STAGE_SETUP) {
+        if (request->wIndex == 0x0004 &&
+            request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_DEVICE &&
+            request->wValue == 0) {
+            uint8_t const *desc = desc_ms_compat_id_get();
+            return tud_control_xfer(rhport, request, (void *)(uintptr_t)desc,
+                                    desc[0]);  // 16B 空表或 40B 单功能表
+        }
+        if (request->wIndex == 0x0005 && usb_km_io_enabled()) {
+            uint8_t itf = winusb_interface_number();
+            // Windows 复合设备：C1、wValue 低字节为接口号。
+            // 同时兼容旧 OS 1.0 文档的 C0、wValue 高字节接口号形式。
+            bool interface_request =
+                request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_INTERFACE &&
+                request->wValue == itf;
+            bool legacy_request =
+                request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_DEVICE &&
+                request->wValue == (uint16_t)(itf << 8);
+            if (!interface_request && !legacy_request) return false;
+            return tud_control_xfer(rhport, request,
+                                    (void *)(uintptr_t)&desc_ms_properties,
+                                    sizeof desc_ms_properties);
+        }
+        return false;
+    }
+    return true;
 }

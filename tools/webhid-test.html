@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pico IO — 传输抽象控制台（HID / 串口）</title>
+<title>Pico IO — 传输抽象控制台（WinUSB / 串口）</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --line: #2a2f3a;
@@ -69,21 +69,21 @@
 <body>
 <div class="wrap">
   <div id="insecure">
-    <b>当前页面不是 secure context</b> —— WebHID / Web Serial 无法使用。可选：
+    <b>当前页面不是 secure context</b> —— WebUSB / Web Serial 无法使用。可选：
     ① 直接双击本文件（file:// 即 secure）；② 用 <b>http://localhost</b> 访问本页；
     ③ 局域网 IP 访问请用 <code>python3 tools/serve_https.py</code>（自签 HTTPS，
     浏览器警告点"继续前往"）。
   </div>
   <h1>Pico IO — 传输抽象控制台</h1>
   <div class="sub">
-    同一套协议 v1（<b>INFO</b> / <b>PRINT</b> / <b>RESET</b>）跑在两个平级传输上：
-    <b>custom HID</b>（设备 USB）与<b>调试串口</b>（USB-TTL 接 GPIO2/3，Web Serial，
-    默认 4M，适配器须支持）。消息层对传输无感。需 Chrome / Edge <b>顶层页面</b>打开。
+    同一套协议 v1（<b>INFO</b> / <b>PRINT</b> / <b>RESET</b> / <b>TEST</b> 压测）跑在两个平级传输上：
+    <b>WinUSB</b>（设备 USB bulk 接口，~1MB/s）与<b>调试串口</b>（USB-TTL 接 GPIO2/3，
+    默认 4M）。消息层对传输无感。需 Chrome / Edge <b>顶层页面</b>打开。
   </div>
 
   <div class="panel">
     <div class="row">
-      <button id="btnConnectHid">连接 HID</button>
+      <button id="btnConnectUsb">连接 WinUSB</button>
       <button id="btnConnectSerial">连接串口</button>
       <label>波特率 <input type="number" id="baud" value="4000000" min="9600" step="1"></label>
       <button id="btnDisconnect" class="ghost" disabled>断开</button>
@@ -97,12 +97,12 @@
       <button id="btnInfo" disabled>INFO 查询</button>
       <button id="btnClear" class="ghost">清空日志</button>
     </div>
-    <h2 style="margin-top:14px">流式压测（临时验证用）——发 N 随机字节，设备收完校验后回发等长随机数据</h2>
+    <h2 style="margin-top:14px">流式压测（保留）——发 N 随机字节，设备收完校验后回发等长随机数据</h2>
     <div class="row">
       <button id="btnTest512k" class="ghost" disabled>512K</button>
       <button id="btnTest1m" class="ghost" disabled>1M</button>
       <button id="btnTest2m" class="ghost" disabled>2M</button>
-      <span class="sub" style="margin:0">HID 2M 双向约 1-2 分钟，串口约 10-20s</span>
+      <span class="sub" style="margin:0">WinUSB 2M 双向约 5-10s，串口约 10-20s</span>
     </div>
   </div>
 
@@ -124,16 +124,14 @@
 "use strict";
 
 // ── 协议常量（与 src/proto.h 一致）──────────────────────────────────
-const VID = 0x054c, USAGE_PAGE = 0xFF00;
-const HID_REPORT_ID_OUT = 2;
-const CHUNK_MAX = 63;                     // HID 报文载荷；串口块同尺寸上限
+const VID = 0x054c;
+const CHUNK_MAX = 63;                     // 块上限（[flags][data]，帧内再算 seq/CRC）
 const F_START = 0x01, F_END = 0x02, F_RESET = 0x04;
-const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03 };
-const CMD_NAME = { [CMD.INFO]: "INFO", [CMD.PRINT]: "PRINT", [CMD.RESET]: "RESET" };
+const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03, TEST: 0x04 };
+const CMD_NAME = { [CMD.INFO]: "INFO", [CMD.PRINT]: "PRINT", [CMD.RESET]: "RESET", [CMD.TEST]: "TEST" };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8");
-const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, "0")).join(" ");
 const flagsStr = (f) =>
   `${f & F_START ? "S" : ""}${f & F_END ? "E" : ""}${f & F_RESET ? "R" : ""}` || "C";
 
@@ -144,7 +142,6 @@ function varintPut(v) {
   return out;
 }
 
-// CRC16-CCITT-FALSE（与设备端一致）
 function crc16(bytes) {
   let crc = 0xFFFF;
   for (const b of bytes) {
@@ -156,7 +153,7 @@ function crc16(bytes) {
   return crc;
 }
 
-// zlib CRC32（与设备端 test_crc 一致）
+// zlib CRC32（与设备端一致）
 function crc32(bytes) {
   let crc = 0xFFFFFFFF;
   for (let i = 0; i < bytes.length; i++) {
@@ -168,111 +165,20 @@ function crc32(bytes) {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
-// ── HID 传输：块 → 满 63B 报文（seq 前缀 + 补零）；IN 报文剥 seq ────
-class HidTransport {
-  constructor(onchunk, onclose) {
-    this.onchunk = onchunk;
-    this.onclose = onclose;
-    this.device = null;
-    this.seq = 0;
-    this.name = "hid";
-  }
-
-  async open() {
-    const devices = await navigator.hid.requestDevice({
-      filters: [{ vendorId: VID, usagePage: USAGE_PAGE }],
-    });
-    if (!devices.length) throw new Error("未选择设备");
-    this.device = devices[0];
-    this.device.addEventListener("inputreport", (e) => this._onReport(e));
-    this.device.addEventListener("disconnect", () => this.onclose?.());
-    await this.device.open();
-  }
-
-  async close() {
-    if (this.device) { try { await this.device.close(); } catch (_) {} }
-  }
-
-  async sendChunk(chunk) {
-    // 报文 = [seq][chunk] 补零到 63B（短 IN/OUT 包在此链路上不可靠）
-    const full = new Uint8Array(CHUNK_MAX);
-    full[0] = this.seq++ & 0xFF;
-    full.set(chunk, 1);
-    console.info(`[picoio/hid] TX #${this.seq} ${full.length}B`);
-    await this.device.sendReport(2 /* REPORT_ID_OUT */, full);
-  }
-
-  _onReport(e) {
-    if (e.reportId !== 1) return;
-    // Chrome 的 e.data 不含 Report ID：raw = [seq][flags][data...]
-    const raw = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
-    if (raw.length < 2) return;
-    this.onchunk(raw.subarray(1));    // 剥 seq → [flags][data...]
-  }
-}
-
-// ── 串口传输：SLIP 转义 + CRC16（与设备端 uart_proto.c 一致）─────────
+// ── SLIP 解码器（帧 = 0xC0 <转义 [seq][flags][data] + CRC16> 0xC0，与
+//    设备端 uart_proto.c / usb_io.c 一致）─────────────────────────────
 const SLIP_END = 0xC0, SLIP_ESC = 0xDB, SLIP_ESC_END = 0xDC, SLIP_ESC_ESC = 0xDD;
 
-class SerialTransport {
-  constructor(onchunk, onclose) {
-    this.onchunk = onchunk;
-    this.onclose = onclose;
-    this.port = null;
-    this.seq = 0;
-    this.name = "uart";
-    this.closing = false;
-    // SLIP 解码状态
+class SlipDecoder {
+  constructor(onchunk, onframeCrcFail) {
+    this.onchunk = onchunk;           // (chunk=[flags][data...]) => void
+    this.onframeCrcFail = onframeCrcFail;
     this.inFrame = false;
     this.escape = false;
     this.buf = [];
   }
 
-  async open(baud) {
-    this.port = await navigator.serial.requestPort();
-    await this.port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
-    this.writer = this.port.writable.getWriter();
-    this.closing = false;
-    this._readLoop().catch((e) => {
-      if (!this.closing) this.onclose?.(e);
-    });
-  }
-
-  async close() {
-    this.closing = true;
-    try { await this.reader?.cancel(); } catch (_) {}
-    try { this.writer?.releaseLock(); } catch (_) {}
-    try { await this.port?.close(); } catch (_) {}
-  }
-
-  async sendChunk(chunk) {
-    // raw = [seq][chunk] + CRC16 LE → SLIP 转义
-    const raw = [this.seq++ & 0xFF, ...chunk];
-    const crc = crc16(raw);
-    raw.push(crc & 0xFF, (crc >> 8) & 0xFF);
-    const frame = [SLIP_END];
-    for (const b of raw) {
-      if (b === SLIP_END) frame.push(SLIP_ESC, SLIP_ESC_END);
-      else if (b === SLIP_ESC) frame.push(SLIP_ESC, SLIP_ESC_ESC);
-      else frame.push(b);
-    }
-    frame.push(SLIP_END);
-    console.info(`[picoio/uart] TX #${this.seq} ${frame.length}B`);
-    await this.writer.write(Uint8Array.from(frame));
-  }
-
-  async _readLoop() {
-    this.reader = this.port.readable.getReader();
-    for (;;) {
-      const { value, done } = await this.reader.read();
-      if (done || this.closing) break;
-      for (const b of value) this._onByte(b);
-    }
-    this.reader.releaseLock();
-    if (!this.closing) this.onclose?.(new Error("串口读取结束"));
-  }
-
-  _onByte(b) {
+  byte(b) {
     if (b === SLIP_END) {
       if (this.inFrame && this.buf.length > 0) this._finish();
       this.inFrame = false;
@@ -304,10 +210,133 @@ class SerialTransport {
     const body = this.buf.slice(0, len - 2);
     const crcRecv = this.buf[len - 2] | (this.buf[len - 1] << 8);
     if (crc16(body) !== crcRecv) {
-      console.info(`[picoio/uart] RX CRC 失败，丢弃 ${len}B`);
+      this.onframeCrcFail?.(len);
       return;
     }
     this.onchunk(Uint8Array.from(body.slice(1)));   // 剥 seq → [flags][data...]
+  }
+}
+
+// ── WinUSB 传输：bulk IN/OUT + SLIP 帧（MS OS 1.0 绑定 winusb.sys）──
+class WinUsbTransport {
+  constructor(onchunk, onclose) {
+    this.onchunk = onchunk;
+    this.onclose = onclose;
+    this.device = null;
+    this.seq = 0;
+    this.closing = false;
+    this.name = "winusb";
+    this.slip = new SlipDecoder(
+      (chunk) => this.onchunk(chunk),
+      (len) => console.info(`[picoio/winusb] RX CRC 失败，丢弃 ${len}B`));
+  }
+
+  async open() {
+    this.device = await navigator.usb.requestDevice({
+      filters: [{ vendorId: VID }],
+    });
+    await this.device.open();
+    if (this.device.configuration === null) await this.device.selectConfiguration(1);
+    const itf = this.device.configuration.interfaces.find(
+      (i) => i.alternates[0].interfaceClass === 255);
+    if (!itf) throw new Error("未找到 WinUSB 接口（IO 接口是否已启用？）");
+    await this.device.claimInterface(itf.interfaceNumber);
+    const eps = itf.alternates[0].endpoints;
+    this.epIn = eps.find((e) => e.direction === "in")?.endpointNumber;
+    this.epOut = eps.find((e) => e.direction === "out")?.endpointNumber;
+    if (this.epIn === undefined || this.epOut === undefined) throw new Error("bulk 端点缺失");
+    this.closing = false;
+    this._readLoop().catch((e) => {
+      if (!this.closing) this.onclose?.(e);
+    });
+  }
+
+  async close() {
+    this.closing = true;
+    try { await this.device?.close(); } catch (_) {}
+  }
+
+  async sendChunk(chunk) {
+    // raw = [seq][chunk] + CRC16 LE → SLIP 转义
+    const raw = [this.seq++ & 0xFF, ...chunk];
+    const crc = crc16(raw);
+    raw.push(crc & 0xFF, (crc >> 8) & 0xFF);
+    const frame = [SLIP_END];
+    for (const b of raw) {
+      if (b === SLIP_END) frame.push(SLIP_ESC, SLIP_ESC_END);
+      else if (b === SLIP_ESC) frame.push(SLIP_ESC, SLIP_ESC_ESC);
+      else frame.push(b);
+    }
+    frame.push(SLIP_END);
+    await this.device.transferOut(this.epOut, Uint8Array.from(frame));
+  }
+
+  async _readLoop() {
+    for (;;) {
+      const res = await this.device.transferIn(this.epIn, 64);
+      if (this.closing) break;
+      if (res.status === "ok" && res.data?.byteLength) {
+        const bytes = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+        for (const b of bytes) this.slip.byte(b);
+      }
+    }
+  }
+}
+
+// ── 串口传输：Web Serial + SLIP 帧（与设备端 uart_proto.c 一致）─────
+class SerialTransport {
+  constructor(onchunk, onclose) {
+    this.onchunk = onchunk;
+    this.onclose = onclose;
+    this.port = null;
+    this.seq = 0;
+    this.closing = false;
+    this.name = "uart";
+    this.slip = new SlipDecoder(
+      (chunk) => this.onchunk(chunk),
+      (len) => console.info(`[picoio/uart] RX CRC 失败，丢弃 ${len}B`));
+  }
+
+  async open(baud) {
+    this.port = await navigator.serial.requestPort();
+    await this.port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
+    this.writer = this.port.writable.getWriter();
+    this.closing = false;
+    this._readLoop().catch((e) => {
+      if (!this.closing) this.onclose?.(e);
+    });
+  }
+
+  async close() {
+    this.closing = true;
+    try { await this.reader?.cancel(); } catch (_) {}
+    try { this.writer?.releaseLock(); } catch (_) {}
+    try { await this.port?.close(); } catch (_) {}
+  }
+
+  async sendChunk(chunk) {
+    const raw = [this.seq++ & 0xFF, ...chunk];
+    const crc = crc16(raw);
+    raw.push(crc & 0xFF, (crc >> 8) & 0xFF);
+    const frame = [SLIP_END];
+    for (const b of raw) {
+      if (b === SLIP_END) frame.push(SLIP_ESC, SLIP_ESC_END);
+      else if (b === SLIP_ESC) frame.push(SLIP_ESC, SLIP_ESC_ESC);
+      else frame.push(b);
+    }
+    frame.push(SLIP_END);
+    await this.writer.write(Uint8Array.from(frame));
+  }
+
+  async _readLoop() {
+    this.reader = this.port.readable.getReader();
+    for (;;) {
+      const { value, done } = await this.reader.read();
+      if (done || this.closing) break;
+      for (const b of value) this.slip.byte(b);
+    }
+    this.reader.releaseLock();
+    if (!this.closing) this.onclose?.(new Error("串口读取结束"));
   }
 }
 
@@ -337,8 +366,7 @@ class PicoIO {
     const header = [cmd, msgid & 0xFF, (msgid >> 8) & 0xFF, ...varintPut(body.length)];
     let sent = 0;
     for (;;) {
-      // 块 = [flags][header][data] ≤ CHUNK_MAX-1（HID 适配器还要前置 1B seq）
-      const cap = CHUNK_MAX - 2 - (sent === 0 ? header.length : 0);
+      const cap = CHUNK_MAX - 1 - (sent === 0 ? header.length : 0);
       const n = Math.min(body.length - sent, cap);
       const chunk = [];
       const flags = (sent === 0 ? F_START : 0) | (sent + n >= body.length ? F_END : 0);
@@ -370,7 +398,6 @@ class PicoIO {
   }
 
   _onChunk(chunk) {
-    this.onchunk?.();
     const flags = chunk[0];
     const data = chunk.subarray(1);
 
@@ -445,7 +472,7 @@ function stats() {
 }
 
 function setConnected(on, name) {
-  $("btnConnectHid").disabled = on;
+  $("btnConnectUsb").disabled = on;
   $("btnConnectSerial").disabled = on;
   $("btnDisconnect").disabled = !on;
   $("btnInfo").disabled = !on;
@@ -465,10 +492,8 @@ async function doInfo() {
   }
 }
 
-// 流式压测（临时）：发 N 随机字节（尾 4B = zlib CRC32），设备校验后回发
+// 流式压测（保留）：发 N 随机字节（尾 4B = zlib CRC32），设备校验后回发
 // 等长随机数据（同样带 CRC32），双向验证完整性
-const CMD_TEST = 0x04;
-
 async function runTest(size) {
   if (!io || !io.transport) return;
   setTestButtons(true);
@@ -487,7 +512,7 @@ async function runTest(size) {
     sys(`压测开始：${size}B 上行中...`);
     const t0 = performance.now();
     const timeout = Math.ceil((size * 2 / 50000 + 30) * 1000);
-    const resp = await io.request(CMD_TEST, body, timeout);
+    const resp = await io.request(CMD.TEST, body, timeout);
     const dur = (performance.now() - t0) / 1000;
 
     if (resp.length !== size) throw new Error(`回包长度 ${resp.length} ≠ ${size}`);
@@ -510,10 +535,10 @@ function setTestButtons(disabled) {
   for (const id of ["btnTest512k", "btnTest1m", "btnTest2m"]) $(id).disabled = disabled;
 }
 
-async function connectHid() {
-  if (!("hid" in navigator)) { err("navigator.hid 不可用：需 Chrome/Edge 顶层页面"); return; }
-  const tr = new HidTransport(null,
-    () => { setConnected(false); err("设备已断开（重枚举或拔出）"); });
+async function connectUsb() {
+  if (!("usb" in navigator)) { err("navigator.usb 不可用：需 Chrome/Edge 顶层页面"); return; }
+  const tr = new WinUsbTransport(null,
+    (e) => { setConnected(false); err("设备已断开" + (e ? "：" + e.message : "")); });
   try {
     await tr.open();
     startSession(tr);
@@ -558,7 +583,7 @@ async function disconnect() {
   sys("已断开");
 }
 
-$("btnConnectHid").onclick = connectHid;
+$("btnConnectUsb").onclick = connectUsb;
 $("btnConnectSerial").onclick = connectSerial;
 $("btnDisconnect").onclick = disconnect;
 $("btnInfo").onclick = doInfo;
@@ -567,10 +592,10 @@ $("btnTest512k").onclick = () => runTest(512 * 1024);
 $("btnTest1m").onclick = () => runTest(1024 * 1024);
 $("btnTest2m").onclick = () => runTest(2 * 1024 * 1024);
 
-if (!("hid" in navigator) && !("serial" in navigator)) {
-  err("当前浏览器不支持 WebHID / Web Serial —— 请用 Chrome / Edge 顶层打开本页");
+if (!("usb" in navigator) && !("serial" in navigator)) {
+  err("当前浏览器不支持 WebUSB / Web Serial —— 请用 Chrome / Edge 顶层打开本页");
 } else {
-  sys("就绪。选择「连接 HID」（设备 USB）或「连接串口」（GPIO2/3 + USB-TTL）");
+  sys("就绪。选择「连接 WinUSB」（设备 USB）或「连接串口」（GPIO2/3 + USB-TTL）");
 }
 if (!window.isSecureContext) {
   $("insecure").style.display = "block";

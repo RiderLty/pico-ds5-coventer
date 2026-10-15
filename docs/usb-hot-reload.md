@@ -28,7 +28,7 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 两队列使用 striped 池，临界区内不嵌套其他锁，不额外消耗 TinyUSB 所需的独占锁池。
 不要恢复手工 SIO 指针、依赖 BSS 零初始化临界区，或为此禁用 RP2350 软件锁。
 
-另一个必要配置是 `CFG_TUD_HID=4`：新配置最多有 DS5、鼠标、键盘、IO 四个 HID 实例。
+另一个必要配置是 `CFG_TUD_HID=3`：新配置最多有 DS5、鼠标、键盘三个 HID 实例（IO 通讯接口是 vendor 类，经 `CFG_TUD_VENDOR=1` 挂载）。
 只配置一个实例不能打开全部接口。无须为热重载修改 TinyUSB 源码。
 
 ## 切换流程与约束
@@ -59,10 +59,10 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 | `false, true, false` | 252B | 5 | DS5=0，鼠标=1 |
 | `true, false, false` | 252B | 5 | DS5=0，键盘=1 |
 | `true, true, false` | 277B | 6 | DS5=0，鼠标=1，键盘=2 |
-| `false, false, true` | 259B | 5 | DS5=0，IO=1 |
-| `false, true, true` | 284B | 6 | DS5=0，鼠标=1，IO=2 |
-| `true, false, true` | 284B | 6 | DS5=0，键盘=1，IO=2 |
-| `true, true, true` | 309B | 7 | DS5=0，鼠标=1，键盘=2，IO=3 |
+| `false, false, true` | 250B | 5 | DS5=0，IO=1 |
+| `false, true, true` | 275B | 6 | DS5=0，鼠标=1，IO=2 |
+| `true, false, true` | 275B | 6 | DS5=0，键盘=1，IO=2 |
+| `true, true, true` | 300B | 7 | DS5=0，鼠标=1，键盘=2，IO=3 |
 
 音频占接口 0..2，DS5 固定为接口 3、IN `0x84` / OUT `0x03`。
 鼠标启用时为接口 4、IN `0x86`、MPS 8B；键盘为接口 4 或 5、IN `0x87`、MPS 16B；
@@ -103,8 +103,8 @@ CDC/NCM 类与 DS5 音频基线在 Windows 上互斥（见 `exp/cdc-serial` 分�
 单飞分块 + RX 重组 + 分发，块格式全传输一致（`[flags][data≤61]`，seq 归
 传输适配器）。两个平级适配器：
 
-- **custom HID**（`usb_io.c`）：块 ↔ 满 63B 报文（seq 前缀 + 补零，短包
-  在 Windows→Chrome 链路上不可靠）；USB 链路可靠，无 CRC
+- **WinUSB vendor**（`usb_io.c`）：块 ↔ SLIP+CRC16 帧（与串口同构，
+  经 vendor FIFO 缓冲）；USB 链路可靠，CRC 仅作应用级兜底
 - **调试串口**（`uart_proto.c`，UART0 4Mbaud，GPIO2/3 + USB-TTL）：帧 =
   `0xC0 <SLIP 转义([seq][flags][data] + CRC16-CCITT)> 0xC0`（RFC 1055）。
   RX 为 DMA 环形接收（移植 pico-hid-mapper，零 RX 中断，溢出/错误守护 +
@@ -141,7 +141,7 @@ proto 通道就绪前的 boot 极早期日志直接丢弃。TinyUSB debug 日志
 
 ```text
 [DS5C][KM] reload: old(kbd=0 mouse=0 io=0) -> new(kbd=1 mouse=1 io=1), ...
-[DS5C][KM] config desc: 309 B, 7 itf, mouse=1 kbd=1 io=1
+[DS5C][KM] config desc: 300 B, 7 itf, mouse=1 kbd=1 io=1
 [DS5C][KM] reconnect requested; waiting for host enumeration
 [DS5C][USB] MOUNTED: ... hid(kbd=1 mouse=1)
 ```

@@ -47,15 +47,18 @@
 #endif
 
 //------------- CLASS -------------//
-// HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标 / custom IO
-// 通讯接口，见 usb_km.c 的 ability_enable 路径）+ UAC1 音频（扬声器/麦克风
-// 端点，数据全部丢弃）
-#define CFG_TUD_CDC              0
-// 热重载后的配置最多包含 4 个 HID 接口：DS5、鼠标、键盘、IO。TinyUSB 会按
+// HID（instance 0 = DS5 手柄；可选追加 NKRO 键盘 / 16bit 鼠标，
+// 见 usb_km.c 的 ability_enable 路径）+ UAC1 音频（扬声器/麦克风端点，
+// 数据全部丢弃）
+// 热重载后的配置最多包含 3 个 HID 接口：DS5、鼠标、键盘。TinyUSB 会按
 // 这个值分配每个接口的端点/控制传输状态；只配 1 无法打开全部 HID 接口。
-#define CFG_TUD_HID              4
+#define CFG_TUD_HID              3
+// WinUSB vendor 接口（IO 通讯，ability_enable 第三开关注册，见 usb_io.c）：
+// class 0xFF 单接口 + bulk IN/OUT，MS OS 1.0 描述符绑定 winusb.sys
+#define CFG_TUD_VENDOR           1
+#define CFG_TUD_VENDOR_RX_BUFSIZE 256
+#define CFG_TUD_VENDOR_TX_BUFSIZE 256
 #define CFG_TUD_AUDIO            1
-#define CFG_TUD_VENDOR           0
 
 // HID Endpoint transfer buffer size
 #define CFG_TUD_HID_EP_BUFSIZE   64
