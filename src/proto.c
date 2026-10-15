@@ -8,6 +8,7 @@
 #include "usb_km.h"
 #include "debug.h"
 #include "uart_proto.h"
+#include "lua_script.h"
 
 // ---------------------------------------------------------------------------
 // 共享临界区：两个通道的消息环都由 core1（print）+ core0（应答/消费）访问
@@ -28,10 +29,11 @@ static void chan_error(proto_chan_t *ch, uint8_t cmd, uint16_t msgid, uint8_t co
 }
 
 // core0 会话复位；持锁清队列，避免与 core1 的日志生产者竞争。
-static void chan_reset(proto_chan_t *ch)
+void proto_chan_reset(proto_chan_t *ch)
 {
     critical_section_enter_blocking(&s_cs);
     ch->head = ch->tail = ch->used = 0;
+    __atomic_add_fetch(&ch->generation, 1u, __ATOMIC_RELEASE);
     critical_section_exit(&s_cs);
     ch->rx_active = ch->stream_rx = false;
     ch->tx_active = ch->stream_tx = false;
@@ -315,6 +317,9 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
     }
 
     switch (cmd) {
+    case PROTO_CMD_SCRIPT:
+        lua_script_request(ch, msgid, body, len);
+        break;
     case PROTO_CMD_INFO: {
         char info[512];
         uart_proto_stats_t uart = uart_proto_stats();
@@ -351,7 +356,7 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
         break;
     }
     case PROTO_CMD_RESET:
-        chan_reset(ch);
+        proto_chan_reset(ch);
         chan_push(ch, PROTO_CMD_RESET, msgid, (const uint8_t *)"", 0);
         DEBUG("[DS5C][IO] session reset via %s\n", ch->tr->name);
         break;
@@ -380,7 +385,7 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
         return;
     }
     if (flags & PROTO_F_RESET) {
-        if (flags == PROTO_F_RESET && dlen == 0u) chan_reset(ch);
+        if (flags == PROTO_F_RESET && dlen == 0u) proto_chan_reset(ch);
         return;
     }
 

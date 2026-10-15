@@ -47,7 +47,7 @@ static lua_State *g_L = NULL;
 //--------------------------------------------------------------------+
 // 执行步数看门狗（防脚本死循环拖垮实时性）
 //
-// 脚本虽是预制的，但回调全部在 core1 USB host 线程同步执行 —— 一个
+// 脚本顶层代码和回调全部在 core1 USB host 线程同步执行 —— 一个
 // `while true do end` 会阻塞 tuh_task。机制：LUA_MASKCOUNT 钩子按固定
 // 指令数轮询，每次轮询用墙钟判定"本次进入 VM"是否超预算——未超时直接
 // return（Lua 自动重置计数继续执行），超时才摘钩子抛错。pcall 捕获后
@@ -91,11 +91,13 @@ bool lua_core_init(const char *script, size_t len) {
 
     g_L = luaL_newstate();
     if (!g_L) {
+        snprintf(g_last_err, sizeof(g_last_err), "out of memory creating Lua VM");
         debugf("[lua_core] luaL_newstate failed");
         return false;
     }
 
     luaL_openlibs(g_L);
+    g_last_err[0] = '\0';
 
     // 加载外部传入的脚本
     if (script && len > 0) {

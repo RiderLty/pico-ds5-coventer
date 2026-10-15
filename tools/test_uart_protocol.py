@@ -72,6 +72,9 @@ TEST = r"""
 #include "uart_proto.c"
 
 void debug_log(const char *fmt, ...) { (void)fmt; }
+void lua_script_request(proto_chan_t *ch, uint16_t id, const uint8_t *data, uint16_t len) {
+    (void)ch; (void)id; (void)data; (void)len;
+}
 bool usb_km_kbd_enabled(void) { return true; }
 bool usb_km_mouse_enabled(void) { return true; }
 bool usb_km_io_enabled(void) { return true; }

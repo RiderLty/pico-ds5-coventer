@@ -37,8 +37,10 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
 - DS5 身份始终为 `054c:0ce6`，运行期切换不会改 VID/PID。
 - UAC1 扬声器/麦克风接口供主机识别和开关流，无实际音频输出。
   Feature 报告按尺寸返回零数据，震动/灯条等输出报告接收后忽略。
-- 板载 Lua 5.4.6 使用预制脚本，无运行期脚本加载；`print` 经 DEBUG → 协议
-  PRINT 通道输出，带约 10ms 步数看门狗。修改 `scripts/default.lua` 后重新构建，CMake 自动更新嵌入头文件。
+- 板载 Lua 5.4.6 支持运行期加载，源码上限 60 KiB；编辑、上传运行只改 RAM，明确保存才写
+  Flash 尾部 512 KiB KV。启动优先加载 KV，缺失或加载失败恢复预制 `scripts/default.lua`。
+  `print` 经 DEBUG → PRINT 通道输出，带约 10ms 执行看门狗。预制脚本修改后由 CMake 自动嵌入。
+  最简编辑器已集成到验证页；API、协议与测试见 [Lua 脚本存储说明](docs/lua-scripts.md)。
 
 手柄按键映射：A/B/X/Y → ✕/○/□/△，LB/RB → L1/R1，LT/RT → L2/R2，
 Select/Create → Create，Start → Options，LS/RS → L3/R3，Home → PS，
@@ -61,7 +63,7 @@ Lua `ability_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开�
 112 键位图报告，实际发送 NKRO。两者接口协议均为 None，不提供 USB HID Boot 协议。
 WinUSB 通讯接口为 class 0xFF 单接口 + bulk 端点对（MS OS 1.0 描述符绑定
 winusb.sys，无 IAD），跑自定义分块协议 v1（INFO 查询 / PRINT 日志流 /
-RESET / TEST 压测，varint 长度 + 分块重组）；Lua `print` 与全部设备日志
+RESET / TEST 压测 / SCRIPT 脚本管理，varint 长度 + 分块重组）；Lua `print` 与全部设备日志
 统一走 `DEBUG()` → 协议 PRINT 通道（4KB 跨核环）。协议命令层与传输解耦：
 WinUSB 与调试串口（UART0 4Mbaud，SLIP+CRC16 帧，DMA 环形接收）两个平级
 传输，命令层无感。验证页见 `tools/webhid-test.html`；网页端可复用 API 见 [PicoDevice 文档](docs/pico-device.md)
@@ -125,6 +127,7 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 | `lib/hidkit-tusb-xinput` | `4fffdf3` | XInput 类驱动 |
 | `lib/hidkit-tusb-switch-pro` | `db5dc8a` | Switch Pro USB 握手库 |
 | `lib/lua-5.4.6` | vendored | Lua 引擎 |
+| `lib/kvstore` | vendored，自 mapper 移植 | logkvs + Flash blockdevice，尾部 512 KiB |
 
 ```bash
 ./scripts/setup-sdk.sh
@@ -160,7 +163,8 @@ PIO-USB 固定在 `pico-hid-mapper` 验证过 Hub 热插拔的旧版基线 `9510
 兼容和 Host 总线静默自愈补丁。运行 `./scripts/setup-sdk.sh` 会自动应用；可用
 `./scripts/apply-patches.sh --status` 检查基线及补丁状态。Host 在总线静默超过
 `PIO_USB_STALL_RECOVER_US`（默认 2500 微秒）后执行软拔插恢复，设为 0 可关闭。
-当前不写运行期 flash；将来若加入 KV 存储，需要另行评估写 flash 导致 Host 静默的问题。
+KV 保存、删除和初始化 / GC 经 SDK `flash_safe_execute` 暂停双核与 IRQ，Host 可能短暂静默并触发
+自愈。运行脚本不写 Flash；保存时保持外设连接的行为仍需上板验证，见 [脚本存储说明](docs/lua-scripts.md)。
 固定版 TinyUSB hub 驱动也会在传输失败后重试状态轮询。
 这一旧基线不支持经 Hub 连接低速（LS）设备；部分键盘、鼠标会受影响。
 

@@ -8,11 +8,11 @@
 const VID = 0x054c;
 const CHUNK_MAX = 62;                     // [flags][data≤61]，与 PROTO_CHUNK_DATA_MAX 一致
 const F_START = 0x01, F_END = 0x02, F_RESET = 0x04;
-const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03, TEST: 0x04, ERROR: 0x7F };
-const CMD_NAME = { [CMD.INFO]: "INFO", [CMD.PRINT]: "PRINT", [CMD.RESET]: "RESET", [CMD.TEST]: "TEST", [CMD.ERROR]: "ERROR" };
+const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03, TEST: 0x04, SCRIPT: 0x20, ERROR: 0x7F };
+const CMD_NAME = { [CMD.INFO]: "INFO", [CMD.PRINT]: "PRINT", [CMD.RESET]: "RESET", [CMD.TEST]: "TEST", [CMD.SCRIPT]: "SCRIPT", [CMD.ERROR]: "ERROR" };
 const ID_RESERVED = 0x0000, ID_BROADCAST = 0xFFFF;
 const MAX_BODY = 512, MAX_TEST = 8 * 1024 * 1024;
-const ERROR_NAME = {1: "不支持的命令", 2: "消息长度非法", 3: "CRC32 校验失败", 4: "设备忙"};
+const ERROR_NAME = {1: "不支持的命令", 2: "消息长度非法", 3: "CRC32 校验失败", 4: "设备忙", 5: "脚本操作失败", 6: "KV 存储失败"};
 
 const dec = new TextDecoder("utf-8");
 
@@ -402,11 +402,11 @@ class ProtocolClient {
       this.rx = null;
       const body = m.buf;
       const p = this.pending.get(m.msgid);
-      const errorReply = m.cmd === CMD.ERROR && body.length === 2 && body[0] === p?.cmd;
+      const errorReply = m.cmd === CMD.ERROR && body.length >= 2 && body[0] === p?.cmd;
       if (m.msgid !== ID_BROADCAST && p && (p.cmd === m.cmd || errorReply)) {
         p.cleanup();
         this.pending.delete(m.msgid);
-        if (errorReply) p.reject(new PicoDeviceError(p.cmd, body[1], m.msgid));
+        if (errorReply) p.reject(new PicoDeviceError(p.cmd, body[1], m.msgid, dec.decode(body.subarray(2))));
         else p.resolve(body);
       }
       // 主动推送与请求回复分开分发，迟到回复不会冒充日志事件。
@@ -434,10 +434,10 @@ class PicoError extends Error {
 }
 
 class PicoDeviceError extends PicoError {
-  constructor(command, deviceCode, messageId) {
-    super(`设备拒绝 ${CMD_NAME[command] ?? command}：${ERROR_NAME[deviceCode] ?? deviceCode}`, "DEVICE");
+  constructor(command, deviceCode, messageId, detail = "") {
+    super(`设备拒绝 ${CMD_NAME[command] ?? command}：${ERROR_NAME[deviceCode] ?? deviceCode}${detail ? `：${detail}` : ""}`, "DEVICE");
     this.name = "PicoDeviceError";
-    Object.assign(this, { command, deviceCode, messageId });
+    Object.assign(this, { command, deviceCode, messageId, detail });
   }
 }
 
@@ -627,6 +627,71 @@ class PicoDevice {
 
   async info(options) { return dec.decode(await this.call(CMD.INFO, new Uint8Array(), options)); }
   async reset(options) { await this.call(CMD.RESET, new Uint8Array(), options); }
+
+  // Serialize multi-request script transactions within this client.
+  _scriptTransaction(fn) {
+    const session = this._session;
+    if (!this.connected || !session || session.closed) return Promise.reject(new PicoError("设备未连接", "DISCONNECTED"));
+    const call = (body, options = {}) => {
+      if (session !== this._session || session.closed) throw new PicoError("脚本操作所属连接已关闭", "DISCONNECTED");
+      return this.call(CMD.SCRIPT, body, { timeoutMs: 30000, ...options });
+    };
+    const job = (session.scriptQueue ?? Promise.resolve()).then(() => fn(call));
+    session.scriptQueue = job.catch(() => {});
+    return job;
+  }
+  _scriptOp(op, options = {}) {
+    return this._scriptTransaction(call => call(Uint8Array.of(op), options));
+  }
+  async scriptStatus(options) { return JSON.parse(dec.decode(await this._scriptOp(0, options))); }
+  async scriptError(options) { return dec.decode(await this._scriptOp(10, options)); }
+
+  /** Upload and run in RAM. Does not save; failures restore the embedded script. */
+  scriptRun(source, options = {}) {
+    const bytes = typeof source === "string" ? new TextEncoder().encode(source) : bytesOf(source).slice();
+    if (!bytes.length || bytes.length > 60 * 1024) return Promise.reject(new RangeError("脚本必须为 1..61440 字节（UTF-8）"));
+    return this._scriptTransaction(async (call) => {
+      const begin = new Uint8Array(9); begin[0] = 1;
+      const view = new DataView(begin.buffer);
+      view.setUint32(1, bytes.length, true); view.setUint32(5, crc32(bytes), true);
+      await call(begin, options);
+      try {
+        for (let offset = 0; offset < bytes.length; offset += 507) {
+          const part = bytes.subarray(offset, offset + 507);
+          const body = new Uint8Array(5 + part.length); body[0] = 2;
+          new DataView(body.buffer).setUint32(1, offset, true); body.set(part, 5);
+          await call(body, options);
+        }
+        await call(Uint8Array.of(3), options);
+      } catch (error) {
+        try { if (!options.signal?.aborted) await call(Uint8Array.of(8), options); } catch {}
+        throw error;
+      }
+      return JSON.parse(dec.decode(await call(Uint8Array.of(0), options)));
+    });
+  }
+  /** Read the current RAM source with a checksum to detect concurrent changes. */
+  scriptRead(options = {}) {
+    return this._scriptTransaction(async (call) => {
+      const status = JSON.parse(dec.decode(await call(Uint8Array.of(0), options)));
+      const bytes = new Uint8Array(status.size);
+      for (let offset = 0; offset < bytes.length; offset += 512) {
+        const count = Math.min(512, bytes.length - offset);
+        const body = new Uint8Array(7); body[0] = 5;
+        const view = new DataView(body.buffer);
+        view.setUint32(1, offset, true); view.setUint16(5, count, true);
+        const part = await call(body, options);
+        if (part.length !== count) throw new PicoError("脚本读取长度不符", "SCRIPT");
+        bytes.set(part, offset);
+      }
+      if (crc32(bytes) !== status.crc32) throw new PicoError("读取期间脚本发生变化，请重试", "SCRIPT");
+      return dec.decode(bytes);
+    });
+  }
+  scriptSave(options) { return this._scriptOp(4, options); }
+  scriptDefault(options) { return this._scriptOp(6, options); }
+  scriptDelete(options) { return this._scriptOp(7, options); }
+  scriptReload(options) { return this._scriptOp(9, options); }
 
   /** Size includes the 4-byte CRC32 trailer; firmware generates a fresh reply. */
   async test(size, options = {}) {

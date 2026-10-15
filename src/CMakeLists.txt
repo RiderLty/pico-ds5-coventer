@@ -19,6 +19,8 @@ target_sources(${target_name} PRIVATE
  audio_stub.c
  lua_core.c
  lua_binder.c
+ lua_store.c
+ lua_script.c
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
  ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
  )
@@ -88,7 +90,15 @@ target_link_libraries(${target_name} PRIVATE
  hidkit_tusb_xinput
  hidkit_tusb_switch_pro
  lua
+ kvstore
 )
+
+# Tail 512 KiB belongs exclusively to KV. Fail the link before firmware can
+# overlap it, while retaining the board's actual PICO_FLASH_SIZE_BYTES.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld
+  "ASSERT(__flash_binary_end <= ORIGIN(FLASH) + LENGTH(FLASH) - 524288, \"firmware overlaps tail KV partition\")\n")
+target_link_options(${target_name} PRIVATE "LINKER:-T,${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld")
+pico_add_link_depend(${target_name} ${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld)
 
 # 可选：调试串口波特率覆盖（默认 4000000，须适配器支持；可 -DDEBUG_BAUDRATE=115200 降速）
 set(DEBUG_BAUDRATE "" CACHE STRING "Debug UART baudrate override (default 4000000)")

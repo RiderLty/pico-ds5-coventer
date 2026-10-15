@@ -143,6 +143,7 @@ void lua_binder_rebind(void) {}
 //--------------------------------------------------------------------+
 
 bool lua_binder_init(const char *script, size_t len) {
+    lua_binder_deinit(); // clear cached registry IDs even if the new script fails
     // 清零 bitmap；创建 VM + 注册内建回调
     memset(g_key_listen, 0, sizeof(g_key_listen));
     g_mouse_listen       = 0;

@@ -72,7 +72,7 @@ const reply = await device.call(command, buffer, {
 
 `command` 是 0..255 整数，`buffer` 默认空字节，接受 ArrayBuffer、TypedArray 或 DataView。
 `call()` 返回回复 body 的 Uint8Array，不含帧头。命令与内容明确分开，固件需实现该命令才能执行。
-当前固件支持 INFO、RESET、TEST；PRINT 是设备日志，ERROR 是设备拒绝请求的回复。
+当前固件支持 INFO、RESET、TEST、SCRIPT；PRINT 是设备日志，ERROR 是设备拒绝请求的回复。
 
 - 普通消息最大 512B；TEST 是 4B..8MiB，包含末尾 CRC32。入队时复制 body，后续修改原缓冲不会影响发送。
 - `call()` 按「完整发送 + 收完回复」顺序执行；可同时发起多个 Promise 调用，但线上同一时刻执行一个请求。
@@ -81,7 +81,7 @@ const reply = await device.call(command, buffer, {
 - 超时从请求出队开始，包含发送及接收，不包括等待前一条请求的时间。
 - ID 0 保留、65535 广播；1..65534 匹配请求回复。同一连接内已发出的 ID 不复用，耗尽需重连。
 - `send(command, buffer, options)` 返回分配的 messageId，只等写入完成；设备回复通过 onMessage 观察，
-  不负责判断设备是否接受命令。RESET/TEST 必须使用 call，防止未等操作完成就发下一条。
+  不负责判断设备是否接受命令。RESET/TEST 必须使用 call；SCRIPT 请使用下述脚本方法等待完成，防止交错或 BUSY。
 - `__send_message()` 和 `__on_message()` 是内部扩展钩子，业务代码使用 call/send 和订阅方法。
 
 ```js
@@ -95,6 +95,32 @@ console.log(result.uploadCrc, result.downloadCrc, result.body);
 `test(size)` 填充随机数据、追加上行 CRC32，并验证回复长度和下行 CRC32；设备回复是新生成的随机数据，
 不是上行内容的原样回显。默认超时随大小增长，可通过 options 覆盖。
 `durationMs` 是调用耗时（含排队），吞吐为双向 MiB/s。size 包含 4B CRC trailer。
+
+## Lua 脚本
+
+编辑和运行只修改 RAM，`scriptSave()` 才写 KV。源码按 UTF-8 计，限制 1..61440 字节；
+持久化分区为 Flash 尾部 512 KiB。启动无 KV 或加载失败时自动运行预制脚本。
+
+| API | 返回与行为 |
+| --- | --- |
+| `scriptStatus(options)` | 状态对象：size/crc32、saved/dirty/default、kvReady、上传进度等 |
+| `scriptRead(options)` | 当前 RAM 源码 string，分块读取后校验 CRC |
+| `scriptRun(source, options)` | 上传并运行，返回状态对象；source 为 string 或字节缓冲，不保存 |
+| `scriptSave(options)` | 保存当前运行源码到 KV，不读取浏览器编辑框 |
+| `scriptReload(options)` | 从 KV 重新加载运行；加载失败恢复预制脚本 |
+| `scriptDefault(options)` | 在 RAM 运行预制脚本，不修改 KV |
+| `scriptDelete(options)` | 删除 KV 脚本，不切换当前运行内容 |
+| `scriptError(options)` | 最近操作错误 string；错误详情也在 PicoDeviceError.detail 中 |
+
+```js
+await device.scriptRun(editor.value);
+// 验证运行正常后，由保存按钮单独调用：
+await device.scriptSave();
+```
+
+脚本方法支持 timeoutMs/signal，默认每条请求 30 秒；同实例的脚本事务串行且绑定当前
+连接。重连不会继续旧上传。RUN 的编译或顶层执行失败会恢复预制源码并拒绝 Promise，
+可再次 `scriptRead()` 读取恢复后的内容。完整协议与状态含义见 [Lua 脚本说明](lua-scripts.md)。
 
 ## 取消与错误
 
@@ -114,7 +140,7 @@ CRC16 坏帧会丢弃并触发 error 事件，如无法完成回复则按请求�
 
 | 错误 | 判别 |
 | --- | --- |
-| 设备拒绝 | `PicoDeviceError`，code=`DEVICE`，提供 command/deviceCode/messageId；deviceCode 1/2/3/4 = 不支持/长度非法/CRC 失败/忙 |
+| 设备拒绝 | `PicoDeviceError`，code=`DEVICE`，提供 command/deviceCode/messageId/detail；deviceCode 1/2/3/4/5/6 = 不支持/长度非法/CRC 失败/忙/脚本失败/KV 失败 |
 | 超时 / 取消 | code=`TIMEOUT` / `ABORTED`（取消的 name 是 AbortError） |
 | 未连接 / 状态冲突 | code=`DISCONNECTED` / `STATE` |
 | 队列满 | code=`QUEUE_FULL` |
@@ -155,9 +181,10 @@ node tools/test_pico_device.mjs
 node tools/test_web_protocol.mjs
 python3 tools/test_uart_protocol.py
 python3 tools/test_usb_descriptors.py
+python3 tools/test_lua_scripts.py
 cmake --build build -j8
 ```
 
 公开 API 测试包含模拟浏览器的真实 WebUSB/Web Serial 适配器路径、资源释放、请求队列、取消、断线重连、
-设备错误、监听器隔离及 4B..513B 的边界。协议测试覆盖 32KiB..8MiB 的真实串口编码/SLIP 往返。
+设备错误、监听器隔离、脚本 UTF-8/60 KiB/会话隔离及 4B..513B 的边界。协议测试覆盖 32KiB..8MiB 的真实串口编码/SLIP 往返。
 模拟测试不代替 Windows 与板子的实机测试。

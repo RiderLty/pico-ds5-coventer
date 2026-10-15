@@ -99,6 +99,7 @@ endif()
 # ── Lua 5.4.6（引擎脚本；vendored 拷贝自 pico-hid-mapper/lib/lua-5.4.6/src，
 #    非 submodule —— 与 mapper 的管理方式一致）────────────────────────────
 add_subdirectory(lib/lua-5.4.6/src)
+add_subdirectory(lib/kvstore)
 add_subdirectory(lib/hidkit)
 add_subdirectory(lib/hidkit-tusb-xinput)
 add_subdirectory(lib/hidkit-tusb-switch-pro)

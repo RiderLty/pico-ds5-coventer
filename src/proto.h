@@ -33,7 +33,8 @@
 // 流式压测命令：body = [随机数据][CRC32 LE]，
 // 收完校验后设备回等长随机数据 + 自身 CRC32
 #define PROTO_CMD_TEST    0x04
-#define PROTO_CMD_ERROR   0x7F  // body = [原 cmd][错误码]，msg_id 回显请求
+#define PROTO_CMD_SCRIPT  0x20
+#define PROTO_CMD_ERROR   0x7F  // body = [原 cmd][错误码][可选 UTF-8 详情]，msg_id 回显请求
 
 #define PROTO_ID_RESERVED  0x0000u
 #define PROTO_ID_BROADCAST 0xFFFFu
@@ -42,6 +43,8 @@
 #define PROTO_ERR_LENGTH   2u
 #define PROTO_ERR_CRC      3u
 #define PROTO_ERR_BUSY     4u
+#define PROTO_ERR_SCRIPT   5u
+#define PROTO_ERR_STORAGE  6u
 
 #define PROTO_F_START     0x01
 #define PROTO_F_END       0x02
@@ -71,6 +74,7 @@ struct proto_chan {
     // 配置（init 后只读）
     const proto_transport_t *tr;
     bool     active;               // 传输可用（WinUSB：接口已启用；UART：恒真）
+    uint32_t generation;           // invalidates asynchronous replies on reset
 
     // 消息环（生产者 core1+core0 / 消费者 core0，共享临界区）
     uint8_t  ring[PROTO_RING_SIZE];
@@ -107,6 +111,8 @@ void proto_init(void);
 
 // 通道初始化：绑定传输操作表（清零全部状态）。active 由适配器按自身状态置位
 void proto_chan_init(proto_chan_t *ch, const proto_transport_t *tr);
+// core0: invalidate asynchronous jobs/replies and clear RX/TX on session changes.
+void proto_chan_reset(proto_chan_t *ch);
 
 // 注册通道供 proto_log_write 广播（最多 2 个：WinUSB + UART）
 void proto_register_channel(proto_chan_t *ch);

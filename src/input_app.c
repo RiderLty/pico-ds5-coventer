@@ -374,6 +374,13 @@ static int _lcb_hidkit_info(lua_State *L) {
 // dmo 侧按键状态（core1 驻留；随每次 push 带出，与位移帧不互斥）
 static uint8_t s_ms_out_buttons;
 
+void input_app_release_outputs(void) {
+    kbd_out_release_all();
+    s_ms_out_buttons = 0;
+    mouse_queue_clear();
+    mouse_queue_push(0, 0, 0, 0);
+}
+
 static int _lcb_ability_enable(lua_State *L) {
     bool kbd   = lua_toboolean(L, 1) != 0;
     bool mouse = lua_toboolean(L, 2) != 0;

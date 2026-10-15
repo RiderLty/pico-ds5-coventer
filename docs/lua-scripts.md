@@ -1,0 +1,112 @@
+# Lua 脚本：RAM 运行与 KV 保存
+
+脚本源码上限为 **60 KiB（61440 字节，按 UTF-8 编码计算）**，KV 独占 Flash 尾部
+**512 KiB**。Pico 2 的 4 MiB Flash 上偏移为 `0x380000..0x3fffff`；使用板级
+`PICO_FLASH_SIZE_BYTES` 计算尾部地址，链接时检查固件不越入分区。
+
+这里的 KV 是 pico-kvstore logkvs，底层 Flash blockdevice 使用 SDK 的
+`flash_safe_execute`。应用只通过 KV 读写 `lua.script`，不直接擦写脚本地址。
+KV 没有独立的固定 value 长度上限，受 bank 可用空间限制：分区分为两个 256 KiB bank，
+每条记录还包含头、key、CRC 和对齐开销。更新需同时容纳旧、新记录；60 KiB 在当前
+配置下可重复保存。小记录追加写入，同一已擦除扇区内的多次保存不必每次擦除；跨入
+新扇区或 GC 时仍会擦除。512 KiB 是日志空间，当前 API 管理一个脚本，不是脚本文件列表。
+
+## 生命周期
+
+- 启动先读 KV，把源码复制到 RAM 后创建 VM。KV 不存在、不可读、源码超长，或脚本
+  编译 / 顶层执行失败时，复制固件内的 `scripts/default.lua` 到 RAM 并运行。
+- BEGIN / WRITE 只上传到临时 RAM，不影响正在运行的脚本，不写 Flash。
+- RUN 验证长度和 CRC 后重建 VM，运行上传源码，成功后把它作为当前 RAM 镜像。
+  语法错误、顶层运行错误或顶层执行超时会恢复预制脚本；KV 中旧脚本保留。
+- SAVE 保存**当前运行的 RAM 镜像**。浏览器编辑框里尚未上传运行的文字不会被保存。
+- RELOAD_SAVED 丢弃未保存内容并重新从 KV 加载运行；失败同样恢复预制脚本。
+- DEFAULT 在 RAM 中运行预制脚本。DELETE 只删除 KV，不切换当前运行内容。
+- VM 切换前释放键盘和鼠标输出。脚本事件回调继续使用原有约 10ms 看门狗；回调错误
+  走日志，不触发自动恢复（自动恢复针对加载 / 顶层执行失败）。
+
+只有 SAVE、DELETE 以及空白 KV 首次初始化 / 后续 GC 会引起存储写入。
+Flash 写入期间双核和 Host IRQ 会短暂停顿，PIO-USB 总线自愈逻辑负责恢复；仍需板上
+验证保存过程中接入键鼠 / Hub 的行为。
+
+## 前端 API 与验证页
+
+打开 `tools/webhid-test.html`，选择 WebUSB 或 Web Serial 后使用 Lua 文本编辑框。
+操作按钮支持读取、上传运行、显式保存、加载 KV、恢复预制、删除 KV 和查询状态。
+
+```js
+const source = await device.scriptRead();       // 当前 RAM 源码，返回 string
+await device.scriptRun(source);                // 上传 + 在 RAM 中运行，不保存
+await device.scriptSave();                     // 确认后持久化
+await device.scriptReload();                   // 从 KV 重新运行
+await device.scriptDefault();                  // 运行预制脚本，不修改 KV
+await device.scriptDelete();                   // 删除 KV，不切换 RAM
+console.log(await device.scriptStatus());
+console.log(await device.scriptError());
+```
+
+各方法支持 `{ timeoutMs, signal }`，默认每条脚本请求超时 30 秒。同一 PicoDevice 的
+脚本操作串行，分块事务绑定当前连接，断线重连后旧事务不能继续。两种端口支持同一
+协议。自定义脚本若关闭或不启用 WinUSB IO，重启后须通过 UART 操作，或让脚本通过
+`ability_enable(kbd, mouse, true)` 启用 IO。运行中改变接口布局也可能断开 WebUSB。
+
+## 通信协议
+
+命令 `SCRIPT=0x20`，普通消息 body 最多 512B；请求首字节为操作码。
+所有整数为 little endian。成功回复同命令、同 message ID；未指定的成功 body 为空。
+
+| 操作 | 请求 body | 成功回复 |
+| --- | --- | --- |
+| STATUS `0` | `[0]` | UTF-8 JSON，字段见下表 |
+| BEGIN `1` | `[1][size:u32][crc32:u32]` | 分配 1..61440B 上传缓冲；同会话重新 BEGIN 替换未完成上传 |
+| WRITE `2` | `[2][offset:u32][data:1..507B]` | offset 必须等于已接收字节数 |
+| RUN `3` | `[3]` | 长度 / CRC 校验通过后运行 RAM 脚本 |
+| SAVE `4` | `[4]` | 保存当前运行镜像到 KV |
+| READ `5` | `[5][offset:u32][count:u16]` | 当前 RAM 原始字节，count 为 0..512 |
+| DEFAULT `6` | `[6]` | 运行预制脚本，丢弃临时上传 |
+| DELETE `7` | `[7]` | 删除 KV；不存在也成功 |
+| ABORT `8` | `[8]` | 丢弃当前会话的临时上传 |
+| RELOAD_SAVED `9` | `[9]` | 丢弃临时上传，从 KV 加载运行 |
+| ERROR `10` | `[10]` | 最近一次操作错误的 UTF-8 文本，最多 159B；无错误时为空 |
+
+CRC32 使用 IEEE / zlib（多项式 `0xedb88320`，初始值和最终异或 `0xffffffff`），覆盖
+完整源码，无结尾 NUL。上传 30 秒无活动、所属通道 RESET 或 USB 断开后临时镜像失效。
+一次仅允许一个上传方；其他通道可查询 STATUS / READ / ERROR，修改操作返回 BUSY。
+脚本操作在 core1 执行，回复交回 core0 发送；RESET 会丢弃尚未执行的旧会话操作和旧回复，
+已经开始的操作不会回滚。
+
+| STATUS 字段 | 含义 |
+| --- | --- |
+| `maxSize` / `partitionSize` | 61440 / 524288 字节 |
+| `size` / `crc32` | 当前 RAM 源码长度和 CRC |
+| `saved` | 最近成功读取或保存过 KV 源码，且此后未删除；不是“当前源码已保存”的标志 |
+| `dirty` | 当前 RAM 镜像尚未通过 SAVE / 成功 RELOAD 与 KV 同步；RUN / DEFAULT / 回退均置 true |
+| `default` | 当前镜像来自预制脚本 |
+| `kvReady` | KV 初始化是否成功 |
+| `uploadSize` / `received` | 临时上传声明长度 / 已接收长度，无上传时为 0 |
+
+`saved=true, dirty=true, default=true` 可表示 KV 有脚本但加载失败，已恢复预制。
+同一份源码重复 RUN 仍会置 dirty；它是操作状态，不是逐字节相等比较。
+
+错误回复 `ERROR=0x7f`：`[0x20][errorCode][optional UTF-8 detail]`。
+沿用 `1=未知操作, 2=长度/偏移错误, 3=CRC错误, 4=忙`，新增 `5=脚本操作失败,
+6=KV操作失败`。上传分配失败或长度 / CRC 校验失败时当前 VM 保留；RUN 的 Lua 加载失败
+才切换预制脚本。浏览器 `PicoDeviceError.detail` 保留诊断文字。
+
+## 验证
+
+```bash
+python3 tools/test_lua_scripts.py
+node tools/test_pico_device.mjs
+node tools/test_web_protocol.mjs
+python3 tools/test_uart_protocol.py
+python3 tools/test_usb_descriptors.py
+cmake --build build -j8
+```
+
+主机测试使用真实 Lua、脚本状态机、logkvs 和模拟 NOR Flash，覆盖 RAM-only 运行、
+保存 / 删除 / 回退、60 KiB、CRC、GC、记录写入中断、会话隔离和无限循环。
+浏览器模拟测试覆盖 UTF-8、分块上传 / 读取、操作顺序和连接关闭。
+
+板上验证顺序：首次无 KV 启动 → 上传运行但不保存 → 断电确认恢复原脚本 → 上传并保存
+→ 断电确认自动加载 → 60 KiB 上传保存 → 错误源码回退 → 删除 KV 后重启。WebUSB 与
+UART 各跑一遍，并在保存时保持 Host 端设备连接。主机测试不替代这些硬件验证。

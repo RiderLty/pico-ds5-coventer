@@ -3,7 +3,7 @@
 #define LUA_DEFAULT_SCRIPT_H
 
 static const char LUA_DEFAULT_SCRIPT[] =
-    "-- 板载 Lua 脚本 —— 键鼠→键鼠 纯 Lua 管线（预制，无动态加载）\n"
+    "-- 板载 Lua 脚本 —— 键鼠→键鼠 纯 Lua 管线（KV 缺失或加载失败时使用的预制脚本）\n"
     "--\n"
     "-- 架构：输入与输出完全解耦，中间只有 Lua。C 侧键鼠→手柄的固定映射管线\n"
     "-- 已移除，hidkit 事件单向通知到脚本，由脚本调用输出函数组装管线：\n"

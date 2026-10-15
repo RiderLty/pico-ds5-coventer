@@ -27,5 +27,7 @@ bool input_app_report(uint8_t instance, uint8_t const *report, uint16_t len);
 
 // core1 主循环每轮调用：推进 Switch Pro 握手状态机（须与 tuh 回调同核同循环）
 void input_app_task(void);
+// core1, before replacing a Lua VM: release held keyboard/mouse outputs.
+void input_app_release_outputs(void);
 
 #endif // INPUT_APP_H

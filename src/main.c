@@ -12,6 +12,7 @@
 #include "hardware/clocks.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 
 #include "pio_usb.h"
 #include "tusb.h"
@@ -25,7 +26,7 @@
 #include "usb_io.h"       // custom IO 通讯接口 echo（ability_enable 第三参动态开关）
 #include "uart_proto.h"   // UART 传输适配器（DMA RX + SLIP 协议帧）
 #include "lua_binder.h"
-#include "lua_default_script.h"   // 预制脚本（CMake 自动 embed，无动态加载）
+#include "lua_script.h"
 
 // ARM 工具链 15.x 兼容: newlib 的 remove()/rename()（Lua os 库拉入）通过
 // _unlink_r/_link_r 调用 _unlink/_link, 但 Pico SDK 的 newlib_interface.c
@@ -49,6 +50,7 @@ void lua_core_debug_cb(const char *msg)
 
 // core1: 处理 USB Host 事件
 void core1_main(void) {
+  flash_safe_execute_core_init();
   sleep_ms(10);
 
   // 通过 tuh_configure() 将 PIO 配置传递给 Host 栈
@@ -64,14 +66,10 @@ void core1_main(void) {
   // hidkit 槽位表清空（须在 tusb_init 之前）
   input_app_init();
 
-  // 初始化 Lua VM + 加载预制脚本（hidkit 回调经 lua_binder 投递，全部在
+  // 初始化 Lua VM + 加载 KV 脚本，缺失或加载失败时回退预制脚本（全部在
   // core1 同线程 —— 与 mapper 的 engine 线程模型一致）。失败不致命：
   // C 默认映射照常，仅无 Lua 事件。
-  if (!lua_binder_init(LUA_DEFAULT_SCRIPT, sizeof(LUA_DEFAULT_SCRIPT) - 1)) {
-    DEBUG("[DS5C][LUA] init failed: %s\n", lua_binder_last_error());
-  } else {
-    DEBUG("[DS5C][LUA] script loaded\n");
-  }
+  lua_script_boot();
 
   // 在 core1 上初始化 PIO-USB Host 栈 (roothub port1)
   tusb_rhport_init_t host_init = {
@@ -85,6 +83,7 @@ void core1_main(void) {
   while (true) {
     tuh_task();
     input_app_task();   // Switch Pro 握手状态机（须与 tuh 回调同核同循环）
+    lua_script_process();
     lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（不节流，dt 兜时差）
   }
 }
@@ -112,8 +111,10 @@ int main(void) {
   input_queue_init();
   // 键鼠队列在启动 core1 前通过 SDK 初始化临界区，兼容 RP2350 软件锁。
   usb_km_init();
+  lua_script_init();
 
   multicore_reset_core1();
+  flash_safe_execute_core_init();
   // 默认 core1 栈只有 2KB，Lua 解析器（luaL_loadbuffer → luaY_parser）栈深
   // 不可控，扩到 16KB（uint32_t 数组 4 字节对齐 + SDK 内部取 8 字节对齐起点，
   // 直接传数组即满足 API 的 uint32_t* 要求）
@@ -142,6 +143,7 @@ int main(void) {
     usb_km_service();  // 键鼠输出队列出队（未启用直接返回）
     usb_io_task();     // IO 通讯接口 echo（未启用直接返回）
     uart_proto_task(); // UART 传输：DMA RX 解析 + 通道 TX
+    lua_script_task();
 
     // DS5 以 1kHz 被主机轮询（bInterval=1）；端点就绪即发送，
     // 未就绪时由主机 NAK 主导节奏，与真实手柄/DS5Dongle 行为一致
@@ -167,6 +169,7 @@ void tud_mount_cb(void)
 
 void tud_umount_cb(void)
 {
+  usb_io_reset_session();
   DEBUG("[DS5C][USB] UMOUNTED: inited=%d mounted=%d\n",
                tud_inited(), tud_mounted());
 }

@@ -38,7 +38,8 @@ class Board {
     else if (m.command === CMD.TEST) {
       P.checkTestResponse(Uint8Array.from(m.body), m.total);
       this.reply(m.command, m.id, Uint8Array.from(m.body));
-    } else if (m.command === 0x10) this.reply(m.command, m.id, Uint8Array.from(m.body));
+    } else if (m.command === CMD.SCRIPT && this.handleScript) this.handleScript(m);
+    else if (m.command === 0x10) this.reply(m.command, m.id, Uint8Array.from(m.body));
     else this.reply(CMD.ERROR, m.id, Uint8Array.of(m.command, 1));
   }
   reply(command, id, body = new Uint8Array()) {
@@ -348,4 +349,114 @@ function fakeUsb() {
   assert.equal(usb.closed, 1);
   assert.equal(device.state, "disconnected");
 }
-console.log("PASS: PicoDevice API, queue/abort/timeout/reconnect, notifications, small boundaries, WebUSB/Web Serial lifecycle");
+// Script helpers exercise real chunking, UTF-8, transactions and error matching.
+class ScriptBoard extends Board {
+  constructor() {
+    super();
+    this.source = text.encode("-- embedded default");
+    this.persisted = null;
+    this.staged = null;
+    this.error = "";
+  }
+  handleScript(m) {
+    const body = Uint8Array.from(m.body), view = new DataView(body.buffer);
+    let reply = new Uint8Array();
+    switch (body[0]) {
+      case 0:
+        reply = text.encode(JSON.stringify({size: this.source.length, crc32: P.crc32(this.source), maxSize: 61440}));
+        break;
+      case 1:
+        assert.equal(body.length, 9);
+        this.staged = new Uint8Array(view.getUint32(1, true));
+        this.expectedCrc = view.getUint32(5, true);
+        this.received = 0;
+        break;
+      case 2: {
+        assert.equal(view.getUint32(1, true), this.received);
+        assert.ok(body.length >= 6 && body.length <= 512);
+        this.staged.set(body.subarray(5), this.received);
+        this.received += body.length - 5;
+        break;
+      }
+      case 3:
+        assert.equal(this.received, this.staged.length);
+        assert.equal(P.crc32(this.staged), this.expectedCrc);
+        if (this.failRun) {
+          this.error = "script:1: syntax error";
+          this.reply(CMD.ERROR, m.id, Uint8Array.of(CMD.SCRIPT, 5, ...text.encode(this.error)));
+          return;
+        }
+        this.source = this.staged;
+        this.staged = null;
+        break;
+      case 4: this.persisted = this.source.slice(); break;
+      case 5:
+        assert.equal(body.length, 7);
+        reply = this.source.slice(view.getUint32(1, true), view.getUint32(1, true) + view.getUint16(5, true));
+        if (this.corruptRead && reply.length) reply[0] ^= 1;
+        break;
+      case 6: this.source = text.encode("-- embedded default"); break;
+      case 7: this.persisted = null; break;
+      case 8: this.staged = null; break;
+      case 9: assert.ok(this.persisted); this.source = this.persisted.slice(); break;
+      case 10: reply = text.encode(this.error); break;
+      default: assert.fail("Unexpected script operation");
+    }
+    this.reply(CMD.SCRIPT, m.id, reply);
+  }
+}
+for (const transport of ["winusb", "serial"]) {
+  const board = new ScriptBoard();
+  const device = new PicoDevice({transportFactory: () => board});
+  await device.connect(transport);
+  const initial = await device.scriptRead();
+  for (const source of ["-- 你好\nmarker=1", "marker=2".padEnd(61440, " ")]) {
+    // SAVE cannot interleave the BEGIN/WRITE/RUN sequence.
+    const [status] = await Promise.all([device.scriptRun(source), device.scriptSave()]);
+    assert.equal(status.size, text.encode(source).length);
+    assert.equal(await device.scriptRead(), source);
+    assert.equal(new TextDecoder().decode(board.persisted), source);
+  }
+  await device.scriptDefault();
+  assert.equal(await device.scriptRead(), initial);
+  await device.scriptReload();
+  assert.equal((await device.scriptRead()).length, 61440);
+  await device.scriptDelete();
+  assert.equal(board.persisted, null);
+  const commands = board.commands.length;
+  await assert.rejects(device.scriptRun(""), RangeError);
+  await assert.rejects(device.scriptRun("中".repeat(20481)), RangeError);
+  assert.equal(board.commands.length, commands);
+  board.failRun = true;
+  await assert.rejects(device.scriptRun("bad"), (error) => {
+    assert.ok(error instanceof PicoDeviceError);
+    assert.equal(error.deviceCode, 5);
+    assert.equal(error.detail, "script:1: syntax error");
+    return true;
+  });
+  assert.equal(board.staged, null); // error cleanup sends ABORT
+  assert.equal(await device.scriptError(), "script:1: syntax error");
+  board.corruptRead = true;
+  await assert.rejects(device.scriptRead(), {code: "SCRIPT"});
+  assert.equal(device.connected, true);
+  await device.disconnect();
+}
+// Queued multi-request work must never migrate to a reconnected device.
+{
+  const boards = [];
+  const device = new PicoDevice({transportFactory: () => { const b = new ScriptBoard(); boards.push(b); return b; }});
+  await device.connect();
+  boards[0].hold = deferred();
+  const running = device.scriptRun("marker=42");
+  const saving = device.scriptSave();
+  const rejected = Promise.all([assert.rejects(running, {code: "DISCONNECTED"}), assert.rejects(saving, {code: "DISCONNECTED"})]);
+  await tick();
+  await device.disconnect();
+  await device.connect();
+  boards[0].hold.resolve();
+  await rejected;
+  assert.deepEqual(boards[1].commands.map(m => m.command), [CMD.RESET]);
+  assert.ok((await device.scriptStatus()).size > 0);
+  await device.disconnect();
+}
+console.log("PASS: PicoDevice API, queue/abort/timeout/reconnect, notifications, small boundaries, script API/60KiB/UTF-8/errors, WebUSB/Web Serial lifecycle");

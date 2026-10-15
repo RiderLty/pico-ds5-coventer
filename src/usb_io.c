@@ -170,8 +170,16 @@ void usb_io_init(void)
 
 void usb_io_set_instance(uint8_t instance)
 {
+    usb_io_reset_session();
     s_chan.active = (instance != USB_IO_INST_NONE);
     DEBUG("[DS5C][IO] winusb io=%d active=%d\n", instance, (int)s_chan.active);
+}
+
+void usb_io_reset_session(void)
+{
+    proto_chan_reset(&s_chan);
+    slip_reset();
+    s_seq = 0;
 }
 
 uint8_t usb_io_instance(void)

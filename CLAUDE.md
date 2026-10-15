@@ -24,7 +24,7 @@ cmake --build build -j8
 # 产物：build/src/pico-ds5-coventer.uf2
 ```
 
-- 无测试、无 lint 配置；`src/CMakeLists.txt` 开 `-Wall -Wextra`，编译警告即全部检查。
+- 回归命令见 `docs/pico-device.md` 与 `docs/lua-scripts.md`；`src/CMakeLists.txt` 开 `-Wall -Wextra`。
 - 烧录：按住 BOOTSEL 插 USB，拷贝 uf2。
 - 调试构建：`cmake -S . -B build-debug -DTUSB_DEBUG_LEVEL=2`（级别 0..3；2 会打印
   枚举与每个端点传输，刷屏且影响时序，定位完必须回 0）。
@@ -55,15 +55,17 @@ python3 tools/serve_https.py           # 自签 HTTPS（WebHID/Web Serial 需要
 | | core0 (`main.c: main`) | core1 (`main.c: core1_main`) |
 |---|---|---|
 | 角色 | USB Device + DS5 映射 | USB Host (PIO-USB) + Lua VM |
-| 主循环 | `tud_task` / `input_queue_flush` / `ds5_pad_tick` / `usb_km_task` / `usb_km_service` / `usb_io_task` / `uart_proto_task` | `tuh_task` / `input_app_task` / `lua_binder_process` |
+| 主循环 | `tud_task` / `input_queue_flush` / `ds5_pad_tick` / `usb_km_task` / `usb_km_service` / `usb_io_task` / `uart_proto_task` / `lua_script_task` | `tuh_task` / `input_app_task` / `lua_script_process` / `lua_binder_process` |
 | 独占 | 全部 `tud_*`、描述符组装、重枚举 | hidkit 回调、Lua VM、Switch Pro 握手 |
 
-跨核唯一通道是 `input_queue.c` 的 SPSC 队列（手柄帧 `INQ_KIND_PAD`），core0 侧
-`ds5_pad.c` 消费。所有 `tud_*` 调用集中在 core0 是为了从结构上消除双核直写
+手柄帧经 `input_queue.c` 的 SPSC 队列（`INQ_KIND_PAD`）交给 core0 的 `ds5_pad.c`；
+键鼠有各自队列，脚本命令通过 `lua_script.c` 的有界 mailbox 往返两核。
+所有 `tud_*` 调用集中在 core0 是为了从结构上消除双核直写
 Device FIFO 的竞态——**不要在 core1 或 Lua 里调 `tud_*` 或改写描述符**。
 
 启动顺序有硬性依赖：`debug_init()` → `input_queue_init()` → `usb_km_init()` →
-`multicore_launch_core1()`。队列临界区必须经 SDK 初始化且在 core1 启动前就绪
+`lua_script_init()` → 两核各自 `flash_safe_execute_core_init()`（core0 在启动 core1 前完成）。
+队列临界区必须经 SDK 初始化且在 core1 启动前就绪
 （生产者随时可能入队）；core1 栈用 `multicore_launch_core1_with_stack` 扩到 16KB
 （默认 2KB 不够 Lua 解析器）。
 
@@ -115,8 +117,12 @@ VM。输出由脚本调 C 注册函数（`dkb_*` / `dmo_*` / `ability_enable`）
 
 - 新增 Lua 函数：在 `input_app.c` 的 `lua_binder_rebind()` 里 `lua_binder_bind()`。
   rebind 在 VM 重建后、脚本加载前调用。
-- 脚本预制嵌入，无运行期加载：`scripts/default.lua` → `tools/embed_lua.py` →
-  `src/lua_default_script.h`（**自动生成，勿手改**；CMake 按时间戳自动重新生成）。
+- 脚本由 `lua_script.c` 在 core1 管理：RAM 镜像最多 60 KiB，显式保存才写 KV；
+  `lua_store.c` 独占 Flash 尾部 512 KiB，默认脚本在 KV 缺失或加载失败时兜底。
+  协议/API/状态语义见 `docs/lua-scripts.md`。双核 Flash 安全初始化必须保留，不能
+  直接在 core0 通讯回调操作 Lua 或写 Flash。
+- 预制脚本：`scripts/default.lua` → `tools/embed_lua.py` → `src/lua_default_script.h`
+  （**自动生成，勿手改**；CMake 自动重新生成）。
 - 手柄输入目前是 C 直通（`ds5_pad.c`），不走 Lua；`pad.*` 接口落地后移交脚本。
 
 ## 平台坑（均已实测踩过，勿重蹈）

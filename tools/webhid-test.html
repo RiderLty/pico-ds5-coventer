@@ -113,6 +113,22 @@
   </div>
 
   <div class="panel">
+    <h2>Lua 脚本（最多 60 KiB UTF-8）</h2>
+    <p class="sub">读取与运行仅使用内存；确认运行正常后，点击“保存当前运行脚本到 KV”。加载失败自动恢复预制脚本。</p>
+    <textarea id="scriptEditor" spellcheck="false" style="width:100%;box-sizing:border-box;min-height:300px;font:14px monospace;tab-size:4" placeholder="在这里编辑 Lua，或点击读取当前脚本"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button data-script="read" disabled>读取当前脚本</button>
+      <button data-script="run" disabled>上传并运行（内存）</button>
+      <button data-script="save" disabled>保存当前运行脚本到 KV</button>
+      <button data-script="reload" class="ghost" disabled>加载 KV 脚本</button>
+      <button data-script="default" class="ghost" disabled>运行预制脚本</button>
+      <button data-script="delete" class="ghost" disabled>删除 KV 脚本</button>
+      <button data-script="status" class="ghost" disabled>状态</button>
+    </div>
+    <pre id="scriptStatus" style="white-space:pre-wrap">未连接</pre>
+  </div>
+
+  <div class="panel">
     <h2>统计</h2>
     <div class="stats">
       <span>收到块 <b id="stChunks">0</b></span>
@@ -165,6 +181,7 @@ function stats() {
 }
 
 function setConnected(on, name) {
+  for (const button of document.querySelectorAll("[data-script]")) button.disabled = !on || scriptBusy;
   $("btnConnectUsb").disabled = on;
   $("btnConnectSerial").disabled = on;
   $("btnDisconnect").disabled = !on;
@@ -233,6 +250,30 @@ $("btnConnectSerial").onclick = () => connect("serial");
 $("btnDisconnect").onclick = disconnect;
 $("btnInfo").onclick = doInfo;
 $("btnClear").onclick = () => { logEl.innerHTML = ""; };
+let scriptBusy = false;
+for (const button of document.querySelectorAll("[data-script]")) {
+  button.onclick = async () => {
+    scriptBusy = true;
+    setConnected(device.connected, device.transportType);
+    try {
+      const action = button.dataset.script;
+      if (action === "read") $("scriptEditor").value = await device.scriptRead();
+      if (action === "run") await device.scriptRun($("scriptEditor").value);
+      if (action === "save") await device.scriptSave();
+      if (action === "reload") { await device.scriptReload(); $("scriptEditor").value = await device.scriptRead(); }
+      if (action === "default") { await device.scriptDefault(); $("scriptEditor").value = await device.scriptRead(); }
+      if (action === "delete") await device.scriptDelete();
+      sys(`Lua: ${action} 完成`);
+    } catch (e) { err(e.message); }
+    try {
+      const status = await device.scriptStatus();
+      const error = await device.scriptError();
+      $("scriptStatus").textContent = JSON.stringify(status, null, 2) + (error ? `\n最近操作错误：${error}` : "");
+    } catch (e) { $("scriptStatus").textContent = e.message; }
+    scriptBusy = false;
+    setConnected(device.connected, device.transportType);
+  };
+}
 for (const button of testButtons) {
   button.onclick = () => runTest(button.dataset.testBytes ? Number(button.dataset.testBytes) : Number(button.dataset.testKib) * 1024);
 }
