@@ -7,6 +7,7 @@
 #include "proto.h"
 #include "usb_km.h"
 #include "debug.h"
+#include "uart_proto.h"
 
 // ---------------------------------------------------------------------------
 // 共享临界区：两个通道的消息环都由 core1（print）+ core0（应答/消费）访问
@@ -15,6 +16,26 @@
 static critical_section_t s_cs;
 static proto_chan_t *s_chans[2];
 static uint8_t s_chan_count;
+
+static bool chan_push(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
+                      const uint8_t *data, uint16_t len);
+
+static void chan_error(proto_chan_t *ch, uint8_t cmd, uint16_t msgid, uint8_t code)
+{
+    if (msgid == PROTO_ID_RESERVED || msgid == PROTO_ID_BROADCAST) return;
+    uint8_t body[] = {cmd, code};
+    chan_push(ch, PROTO_CMD_ERROR, msgid, body, sizeof body);
+}
+
+// core0 会话复位；持锁清队列，避免与 core1 的日志生产者竞争。
+static void chan_reset(proto_chan_t *ch)
+{
+    critical_section_enter_blocking(&s_cs);
+    ch->head = ch->tail = ch->used = 0;
+    critical_section_exit(&s_cs);
+    ch->rx_active = ch->stream_rx = false;
+    ch->tx_active = ch->stream_tx = false;
+}
 
 // LEB128 / protobuf varint（长度字段编码）
 static uint8_t *varint_put(uint8_t *p, uint32_t v)
@@ -44,7 +65,7 @@ static const uint8_t *varint_get(const uint8_t *p, const uint8_t *end, uint32_t 
 }
 
 // ---------------------------------------------------------------------------
-// 流式压测（临时，PROTO_CMD_TEST；验证稳定性后整段删除）
+// 流式压测（PROTO_CMD_TEST）
 // 消息体 = [随机数据...][CRC32 LE]（zlib），收发两侧同构。RX 绕过重组
 // 缓冲逐字节喂 CRC（尾 4B 预扣作校验码），TX 用 xorshift32 现场生成。
 // ---------------------------------------------------------------------------
@@ -80,18 +101,19 @@ static void test_tx_start(proto_chan_t *ch)
 {
     ch->stream_tx = true;
     ch->tx_total  = ch->rx_total;
-    ch->tx_cmd    = ch->rx_cmd;      // 回显：cmd 与 msg_id 必须与请求一致，
-    ch->tx_msgid  = ch->rx_msgid;    // 否则上位机 pending 匹配不上 → 超时
+    ch->stream_msgid = ch->rx_msgid;
     ch->txcrc = CRC32_INIT;
     ch->rng = (uint32_t)(time_us_64()) | 1u;
-    ch->tx_off = 0;
+    ch->stream_off = 0;
 }
 
 static void test_rx_end(proto_chan_t *ch)
 {
     ch->stream_rx = false;
+    ch->rx_active = false;
 
     if (ch->rx_off != ch->rx_total || ch->rx_pend_n != 4u) {
+        chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_LENGTH);
         DEBUG("[test] rx FAIL: got %lu/%lu B\n",
               (unsigned long)ch->rx_off, (unsigned long)ch->rx_total);
         return;
@@ -99,6 +121,7 @@ static void test_rx_end(proto_chan_t *ch)
     uint32_t crc_recv = (uint32_t)ch->rx_pend[0] | ((uint32_t)ch->rx_pend[1] << 8) |
                         ((uint32_t)ch->rx_pend[2] << 16) | ((uint32_t)ch->rx_pend[3] << 24);
     if ((ch->rxcrc ^ 0xFFFFFFFFu) != crc_recv) {
+        chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_CRC);
         DEBUG("[test] rx FAIL: crc %08lx != %08lx\n",
               (unsigned long)(ch->rxcrc ^ 0xFFFFFFFFu), (unsigned long)crc_recv);
         return;
@@ -129,19 +152,25 @@ static bool test_tx_chunk(proto_chan_t *ch)
 {
     if (!ch->tr->ready(ch)) return false;
 
+    // 传输 ready 只表示可能可发，send_chunk 仍可能因 FIFO 空间不足拒收。
+    // 在整块被接受前，生成器、CRC 和偏移都必须保持可重试。
+    uint32_t saved_off = ch->stream_off;
+    uint32_t saved_crc = ch->txcrc;
+    uint32_t saved_rng = ch->rng;
+
     uint8_t chunk[1u + PROTO_CHUNK_DATA_MAX];
     uint16_t pos = 0;
     chunk[pos++] = 0;
 
-    bool first = (ch->tx_off == 0);
+    bool first = (ch->stream_off == 0);
     if (first) {
-        chunk[pos++] = ch->tx_cmd;
-        chunk[pos++] = (uint8_t)(ch->tx_msgid & 0xFFu);
-        chunk[pos++] = (uint8_t)(ch->tx_msgid >> 8);
+        chunk[pos++] = PROTO_CMD_TEST;
+        chunk[pos++] = (uint8_t)(ch->stream_msgid & 0xFFu);
+        chunk[pos++] = (uint8_t)(ch->stream_msgid >> 8);
         pos = (uint16_t)(varint_put(chunk + pos, ch->tx_total) - chunk);
     }
 
-    uint32_t payload_left = (uint32_t)(ch->tx_total - 4u - ch->tx_off);
+    uint32_t payload_left = (uint32_t)(ch->tx_total - 4u - ch->stream_off);
     uint16_t cap = (uint16_t)((1u + PROTO_CHUNK_DATA_MAX) - pos);
     uint16_t n = (payload_left > cap) ? cap : (uint16_t)payload_left;
 
@@ -152,8 +181,8 @@ static bool test_tx_chunk(proto_chan_t *ch)
     } else {
         test_gen(ch, chunk + pos, n);
         pos = (uint16_t)(pos + n);
-        ch->tx_off += n;
-        last = (ch->tx_off == ch->tx_total - 4u) &&
+        ch->stream_off += n;
+        last = (ch->stream_off == ch->tx_total - 4u) &&
                ((uint16_t)(pos + 4u) <= (1u + PROTO_CHUNK_DATA_MAX));
     }
     if (last) {
@@ -173,6 +202,9 @@ static bool test_tx_chunk(proto_chan_t *ch)
         }
         return true;
     }
+    ch->stream_off = saved_off;
+    ch->txcrc = saved_crc;
+    ch->rng = saved_rng;
     return false;
 }
 
@@ -201,7 +233,8 @@ static void ring_write(proto_chan_t *ch, uint16_t pos, const uint8_t *src, uint1
 static bool chan_push(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
                       const uint8_t *data, uint16_t len)
 {
-    if (len > PROTO_RING_SIZE - PROTO_ENTRY_HDR) {
+    if (msgid == PROTO_ID_RESERVED) return false;
+    if (len > PROTO_RX_REASM_MAX) {
         critical_section_enter_blocking(&s_cs);
         ch->drops++;
         critical_section_exit(&s_cs);
@@ -211,7 +244,8 @@ static bool chan_push(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
     bool ok = false;
     critical_section_enter_blocking(&s_cs);
     uint16_t need = (uint16_t)(PROTO_ENTRY_HDR + len);
-    if (PROTO_RING_SIZE - ch->used >= need) {
+    uint16_t reserve = msgid == PROTO_ID_BROADCAST ? PROTO_REPLY_RESERVE : 0u;
+    if (PROTO_RING_SIZE - ch->used >= need + reserve) {
         uint8_t hdr[PROTO_ENTRY_HDR] = { cmd, (uint8_t)msgid, (uint8_t)(msgid >> 8),
                                          (uint8_t)len, (uint8_t)(len >> 8) };
         ring_write(ch, ch->head, hdr, PROTO_ENTRY_HDR);
@@ -248,10 +282,11 @@ static bool chan_pop_header(proto_chan_t *ch)
 }
 
 // 从环内数据区（已弹出 5B 头）就地读一段数据，不整条拷贝
-static void chan_read_data(proto_chan_t *ch, uint16_t off, uint8_t *dst, uint16_t n)
+static void chan_read_data(proto_chan_t *ch, uint8_t *dst, uint16_t n)
 {
     critical_section_enter_blocking(&s_cs);
-    ring_read(ch, (uint16_t)(ch->tail + off), dst, n);
+    // chan_commit 已推进 tail；不能再加累计 tx_off，否则第二块起会跳读。
+    ring_read(ch, ch->tail, dst, n);
     critical_section_exit(&s_cs);
 }
 
@@ -273,34 +308,55 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
     DEBUG("[DS5C][IO] dispatch(%s): cmd=0x%02x msgid=%u len=%u\n",
                  ch->tr->name, cmd, msgid, len);
     (void)body;
-    (void)len;
+
+    if (len != 0u && (cmd == PROTO_CMD_INFO || cmd == PROTO_CMD_RESET)) {
+        chan_error(ch, cmd, msgid, PROTO_ERR_LENGTH);
+        return;
+    }
 
     switch (cmd) {
     case PROTO_CMD_INFO: {
-        char info[192];
+        char info[512];
+        uart_proto_stats_t uart = uart_proto_stats();
         uint32_t uptime_ms = to_ms_since_boot(get_absolute_time());
         int n = snprintf(info, sizeof info,
                          "pico-ds5-coventer\n"
                          "transport: %s\n"
+                         "protocol: 1 ids:1..65534 broadcast:65535\n"
+                         "max_request: 512 max_test: 8388608\n"
                          "build: " __DATE__ " " __TIME__ "\n"
                          "uptime_ms: %lu\n"
                          "kbd:%d mouse:%d io:%d\n"
-                         "log_drops: %lu",
+                         "log_drops: %lu\n"
+                         "uart_baud: %lu\n"
+                         "uart_ring_discard_bytes: %lu\n"
+                         "uart_errors: %lu crc_errors: %lu frame_errors: %lu\n"
+                         "uart_seq_gaps: %lu dma_restarts: %lu",
                          ch->tr->name,
                          (unsigned long)uptime_ms,
                          (int)usb_km_kbd_enabled(), (int)usb_km_mouse_enabled(),
                          (int)usb_km_io_enabled(),
-                         (unsigned long)ch->drops);
+                         (unsigned long)ch->drops,
+                         (unsigned long)DEBUG_BAUDRATE,
+                         (unsigned long)uart.ring_discard_bytes,
+                         (unsigned long)uart.uart_errors,
+                         (unsigned long)uart.crc_errors,
+                         (unsigned long)uart.frame_errors,
+                         (unsigned long)uart.seq_gaps,
+                         (unsigned long)uart.dma_restarts);
         if (n > 0) {
+            if (n >= (int)sizeof info) n = (int)sizeof info - 1;
             chan_push(ch, PROTO_CMD_INFO, msgid, (const uint8_t *)info, (uint16_t)n);
         }
         break;
     }
     case PROTO_CMD_RESET:
-        ch->rx_active = false;
+        chan_reset(ch);
+        chan_push(ch, PROTO_CMD_RESET, msgid, (const uint8_t *)"", 0);
         DEBUG("[DS5C][IO] session reset via %s\n", ch->tr->name);
         break;
     default:
+        chan_error(ch, cmd, msgid, PROTO_ERR_COMMAND);
         DEBUG("[DS5C][IO] unknown cmd 0x%02x via %s\n", cmd, ch->tr->name);
         break;
     }
@@ -318,56 +374,81 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
     const uint8_t *data = chunk + 1;
     uint16_t dlen = (uint16_t)(len - 1u);
 
+    if (len > 1u + PROTO_CHUNK_DATA_MAX ||
+        (flags & ~(PROTO_F_START | PROTO_F_END | PROTO_F_RESET))) {
+        ch->rx_active = ch->stream_rx = false;
+        return;
+    }
     if (flags & PROTO_F_RESET) {
-        ch->rx_active = false;
-        ch->stream_rx = false;
+        if (flags == PROTO_F_RESET && dlen == 0u) chan_reset(ch);
         return;
     }
 
-    // 流式测试收包中：喂 CRC，END 出结果。HID 适配器的块恒满长（补零），
-    // 超出 total 的补零不进流
-    if (ch->stream_rx) {
+    // 流式测试收包中：喂 CRC，END 出结果；变长帧不允许额外填充。
+    if (ch->stream_rx && !(flags & PROTO_F_START)) {
         uint32_t space = ch->rx_total - ch->rx_off;
-        uint16_t feed = (dlen > space) ? (uint16_t)space : dlen;
-        test_rx_feed(ch, data, feed);
+        if (dlen > space) {
+            ch->rx_active = ch->stream_rx = false;
+            chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_LENGTH);
+            return;
+        }
+        test_rx_feed(ch, data, dlen);
         if (flags & PROTO_F_END) test_rx_end(ch);
         return;
     }
 
     if (flags & PROTO_F_START) {
+        // 新消息可恢复丢失 END 后的会话，不能把 START 头当作旧压测数据。
+        ch->rx_active = false;
+        ch->stream_rx = false;
         if (dlen < 3u) return;
+        uint16_t msgid = (uint16_t)(data[1] | (data[2] << 8));
+        if (msgid == PROTO_ID_RESERVED || msgid == PROTO_ID_BROADCAST) return;
         uint32_t total = 0;
         const uint8_t *q = varint_get(data + 3, data + dlen, &total);
         if (!q) {
-            ch->rx_active = false;
+            chan_error(ch, data[0], msgid, PROTO_ERR_LENGTH);
+            return;
+        }
+        if ((uint32_t)(data + dlen - q) > total) {
+            chan_error(ch, data[0], msgid, PROTO_ERR_LENGTH);
             return;
         }
         ch->rx_active = true;
         ch->rx_cmd    = data[0];
-        ch->rx_msgid  = (uint16_t)(data[1] | (data[2] << 8));
+        ch->rx_msgid  = msgid;
         ch->rx_total  = total;
         ch->rx_off    = 0;
 
         if (ch->rx_cmd == PROTO_CMD_TEST) {
-            // 流式模式（任意长度，绕过重组缓冲）
+            if (total < 4u || total > PROTO_TEST_MAX || ch->stream_tx) {
+                ch->rx_active = false;
+                chan_error(ch, data[0], msgid,
+                           ch->stream_tx ? PROTO_ERR_BUSY : PROTO_ERR_LENGTH);
+                return;
+            }
+            // 流式模式（不超过 PROTO_TEST_MAX，绕过重组缓冲）
             ch->stream_rx = true;
             ch->rx_pend_n = 0u;
             ch->rxcrc = CRC32_INIT;
-            test_rx_feed(ch, q, (uint16_t)(dlen - (uint16_t)(q - data)));
+            uint16_t feed = (uint16_t)(dlen - (uint16_t)(q - data));
+            test_rx_feed(ch, q, feed);
             if (flags & PROTO_F_END) test_rx_end(ch);
             return;
         }
 
         if (total > PROTO_RX_REASM_MAX) {
             ch->rx_active = false;
+            chan_error(ch, data[0], msgid, PROTO_ERR_LENGTH);
             return;
         }
         ch->rx_off = (uint16_t)(dlen - (uint16_t)(q - data));
-        if (ch->rx_off > ch->rx_total) ch->rx_off = ch->rx_total;   // 传输侧补零裁剪
         memcpy(ch->rx_buf, q, ch->rx_off);
         if (flags & PROTO_F_END) {
             ch->rx_active = false;
-            chan_dispatch(ch, ch->rx_cmd, ch->rx_msgid, ch->rx_buf, ch->rx_off);
+            if (ch->rx_off == ch->rx_total)
+                chan_dispatch(ch, ch->rx_cmd, ch->rx_msgid, ch->rx_buf, ch->rx_off);
+            else chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_LENGTH);
         }
         return;
     }
@@ -375,13 +456,19 @@ void proto_chan_rx(proto_chan_t *ch, const uint8_t *chunk, uint16_t len)
     if (!ch->rx_active) return;   // CONT/END 无在途消息，丢弃
 
     uint32_t space = ch->rx_total - ch->rx_off;
-    if (dlen > space) dlen = space;
+    if (dlen > space) {
+        ch->rx_active = false;
+        chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_LENGTH);
+        return;
+    }
     memcpy(ch->rx_buf + ch->rx_off, data, dlen);
     ch->rx_off = (uint16_t)(ch->rx_off + dlen);
 
     if (flags & PROTO_F_END) {
         ch->rx_active = false;
-        chan_dispatch(ch, ch->rx_cmd, ch->rx_msgid, ch->rx_buf, ch->rx_off);
+        if (ch->rx_off == ch->rx_total)
+            chan_dispatch(ch, ch->rx_cmd, ch->rx_msgid, ch->rx_buf, ch->rx_off);
+        else chan_error(ch, ch->rx_cmd, ch->rx_msgid, PROTO_ERR_LENGTH);
     }
 }
 
@@ -393,8 +480,9 @@ void proto_chan_task(proto_chan_t *ch)
 {
     if (!ch->active) return;
 
-    // 流式压测发送优先（占用通道期间环内消息排队等待）
-    if (ch->stream_tx) {
+    // 先完成已开始的普通消息，避免 TEST 的 START 插进 PRINT 的 CONT/END。
+    // 流式压测期间新的环内消息等待，流式状态与普通消息状态互不覆盖。
+    if (ch->stream_tx && !ch->tx_active) {
         test_tx_chunk(ch);
         return;
     }
@@ -418,7 +506,7 @@ void proto_chan_task(proto_chan_t *ch)
     uint16_t n = (uint16_t)(ch->tx_len - ch->tx_off);
     if (n > cap) n = cap;
 
-    chan_read_data(ch, ch->tx_off, chunk + pos, n);
+    chan_read_data(ch, chunk + pos, n);
     pos = (uint16_t)(pos + n);
 
     bool last = (ch->tx_off + n) == ch->tx_len;
@@ -457,12 +545,12 @@ void proto_log_write(const uint8_t *data, uint16_t len)
     for (uint8_t i = 0; i < s_chan_count; i++) {
         proto_chan_t *ch = s_chans[i];
         if (!ch->active) continue;
-        chan_push(ch, PROTO_CMD_PRINT, 0u, data, len);
+        chan_push(ch, PROTO_CMD_PRINT, PROTO_ID_BROADCAST, data, len);
     }
 }
 
-void proto_chan_submit(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
+bool proto_chan_submit(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
                        const uint8_t *data, uint16_t len)
 {
-    chan_push(ch, cmd, msgid, data, len);
+    return chan_push(ch, cmd, msgid, data, len);
 }

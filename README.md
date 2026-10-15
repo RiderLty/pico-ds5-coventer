@@ -64,7 +64,7 @@ winusb.sys，无 IAD），跑自定义分块协议 v1（INFO 查询 / PRINT 日�
 RESET / TEST 压测，varint 长度 + 分块重组）；Lua `print` 与全部设备日志
 统一走 `DEBUG()` → 协议 PRINT 通道（4KB 跨核环）。协议命令层与传输解耦：
 WinUSB 与调试串口（UART0 4Mbaud，SLIP+CRC16 帧，DMA 环形接收）两个平级
-传输，命令层无感。验证页见 `tools/webhid-test.html`
+传输，命令层无感。验证页见 `tools/webhid-test.html`；网页端可复用 API 见 [PicoDevice 文档](docs/pico-device.md)
 （WebUSB / Web Serial 双入口）。键鼠为单接口 HID，IO 为单接口 vendor，均**无 IAD**——带 IAD 的
 USB 类（CDC/NCM 等）会令 Windows usbccgp 放弃 legacy 音频分组、拆散 DS5 音频
 接口（详见 docs/usb-hot-reload.md 与 exp/cdc-serial 分支的探索记录）。
@@ -74,6 +74,7 @@ Windows OS 描述符从首次枚举起始终可读；IO 关闭时 Compatible ID 
 启用时返回 `WINUSB` 与 `DeviceInterfaceGUIDs` 属性。8 种布局分别使用
 `bcdDevice=0x0120..0x0127`（默认全开 `0x0127`），避免跨布局复用 OS 描述符缓存。
 代码 28 的根因、刷入后验证与主机侧测试见 [Windows WinUSB 排查](docs/winusb-windows.md)。
+串口压测失败的代码原因、诊断计数和复测步骤见 [串口压测排查](docs/uart-stress.md)。
 
 RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 启动前完成。
 根因、切换顺序、日志和硬件验证记录见 [USB 描述符热重载说明](docs/usb-hot-reload.md)。

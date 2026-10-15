@@ -5,14 +5,13 @@
 
 /*
  * uart_proto — 调试串口（UART0，4Mbaud）传输适配器（协议 v1，通道核心见
- * proto.c）。与 custom HID 平级承载同一套 INFO/PRINT/RESET 协议。
+ * proto.c）。与 WinUSB 平级承载同一套 INFO/PRINT/RESET/TEST 协议。
  *
  * RX：DMA 环形接收（移植 pico-hid-mapper/src/uart.c 成熟方案，零 RX 中断），
- * 逐字节喂 COBS 增量解码器；帧 = COBS([seq][flags][data] + CRC16-CCITT) +
- * 0x00 分隔。调试日志文本与协议帧混流：日志为 ASCII（无 0x00），解码器以
- * 0x00 重同步、垃圾帧被 CRC 淘汰——串口终端可读性保留，协议不受干扰。
+ * 逐字节喂 SLIP 增量解码器；帧 = 0xC0 + SLIP([seq][flags][data] +
+ * CRC16-CCITT) + 0xC0。线上只有协议帧，日志经 PRINT 消息传送。
  *
- * TX：块 + CRC16 → COBS 编码 → debug_write_raw（持 debug 锁，防日志交错
+ * TX：块 + CRC16 → SLIP 编码 → debug_write_raw（持 debug 锁，防日志交错
  * 撕裂帧）。
  */
 
@@ -24,5 +23,17 @@ void uart_proto_task(void);
 
 // UART 通道消息环丢弃计数（诊断用）
 uint32_t uart_proto_drops(void);
+
+typedef struct {
+    uint32_t ring_discard_bytes;
+    uint32_t uart_errors;
+    uint32_t crc_errors;
+    uint32_t frame_errors;
+    uint32_t seq_gaps;
+    uint32_t dma_restarts;
+} uart_proto_stats_t;
+
+// core0 调用；INFO 查询包含这些计数，用于区分链路错误与协议/网页误判。
+uart_proto_stats_t uart_proto_stats(void);
 
 #endif // UART_PROTO_H

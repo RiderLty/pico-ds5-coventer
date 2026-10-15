@@ -17,9 +17,7 @@
  *   线上帧 = 0xC0 <转义([seq][flags][data] + CRC16 LE)> 0xC0
  *   转义：0xC0 → DB DC，0xDB → DB DD（RFC 1055 SLIP）
  *
- * 选 SLIP 而非 COBS：实现无边界歧义、逐字节状态机简单，重同步特性相同
- * （分隔字节即帧界）。调试日志为 ASCII（不含 0xC0/0xDB），与协议帧混流时
- * 日志文本落在帧外被解码器自然忽略；线上垃圾帧由 CRC16 淘汰。
+ * 线上只有协议帧，调试日志经 PRINT 消息传送；垃圾帧由 CRC16 淘汰。
  */
 
 #define UART_RX_RING_SIZE  4096u
@@ -27,6 +25,12 @@
 #error "UART_RX_RING_SIZE must be a power of two (DMA ring wrap)"
 #endif
 #define UART_RX_RING_BITS  (__builtin_ctz(UART_RX_RING_SIZE))
+
+// DMA 传输计数独立于地址回绕；长周期计数允许发现整圈覆盖。
+// 不能只比较环形写地址：生产者写完一整圈后地址相同，会被误判为没有数据。
+#define UART_RX_DMA_PERIOD (1u << 27)
+#define UART_RX_DMA_MASK   (UART_RX_DMA_PERIOD - 1u)
+#define UART_RX_TASK_BUDGET 1024u
 
 #define UART_RX_FRAME_TIMEOUT_US 50000u   // 半帧超时：主机断发后尽快重同步
 
@@ -42,8 +46,10 @@
 
 static uint8_t  uart_rx_ring[UART_RX_RING_SIZE] __attribute__((aligned(UART_RX_RING_SIZE)));
 static uint32_t uart_rx_tail;
-static volatile uint32_t rx_overflow_count;
-static volatile uint32_t rx_error_count;
+static uart_proto_stats_t s_stats;
+static bool s_dma_started;
+static bool s_rx_seq_valid;
+static uint8_t s_rx_seq;
 #define UART_RX_DMA 15
 
 // ---- SLIP 解码状态（core0 uart_proto_task 上下文独占）----
@@ -109,11 +115,15 @@ static void slip_finish_frame(void)
     s_slip.in_frame = false;
 
     uint16_t len = s_slip.len;
-    if (len < 4u) return;                // seq + flags + CRC16 最少 4B
+    if (len < 4u) { s_stats.frame_errors++; return; }
 
     uint16_t crc_calc = crc16_update(CRC16_INIT, s_slip.buf, (uint16_t)(len - 2u));
     uint16_t crc_recv = (uint16_t)(s_slip.buf[len - 2u] | (s_slip.buf[len - 1u] << 8));
-    if (crc_calc != crc_recv) return;    // 噪声帧 / 日志垃圾，静默丢弃
+    if (crc_calc != crc_recv) { s_stats.crc_errors++; return; }
+
+    if (s_rx_seq_valid && s_slip.buf[0] != s_rx_seq) s_stats.seq_gaps++;
+    s_rx_seq = (uint8_t)(s_slip.buf[0] + 1u);
+    s_rx_seq_valid = true;
 
     // buf = [seq][flags][data...] → 剥 seq 喂通道核心
     proto_chan_rx(&g_uart_chan, s_slip.buf + 1, (uint16_t)(len - 3u));
@@ -137,12 +147,13 @@ static void slip_process_byte(uint8_t b)
         s_slip.escape = false;
         if (b == SLIP_ESC_END) b = SLIP_END;
         else if (b == SLIP_ESC_ESC) b = SLIP_ESC;
-        else { slip_reset(); return; }   // 非法转义，重同步
+        else { s_stats.frame_errors++; slip_reset(); return; }
     } else if (b == SLIP_ESC) {
         s_slip.escape = true;
         return;
     }
     if (s_slip.len >= DECODED_MAX) {
+        s_stats.frame_errors++;
         slip_reset();                    // 超长：噪声/垃圾，重同步
         return;
     }
@@ -192,38 +203,48 @@ void uart_proto_task(void)
 
     // 通道守护兼首启：self-trigger 模式下正常永不停机；异常停机则完整重装
     if (!dma_channel_is_busy(UART_RX_DMA)) {
+        if (s_dma_started) s_stats.dma_restarts++;
+        s_dma_started = true;
+        uart_rx_tail = 0;
+        s_rx_seq_valid = false;
+        slip_reset();
         dma_channel_set_read_addr(UART_RX_DMA, &uart_get_hw(DEBUG_UART)->dr, false);
         dma_channel_set_write_addr(UART_RX_DMA, uart_rx_ring, false);
         dma_channel_set_transfer_count(
-            UART_RX_DMA, dma_encode_transfer_count_with_self_trigger(UART_RX_RING_SIZE), false);
+            UART_RX_DMA, dma_encode_transfer_count_with_self_trigger(UART_RX_DMA_PERIOD), false);
         dma_channel_start(UART_RX_DMA);
     }
 
-    // 接收错误（FE/PE/BE）：计数并清除；出错字节仍进环按普通字节消费
+    // 接收错误（FE/PE/BE/OE）：计数并清除；出错字节仍进环按普通字节消费
     uint32_t rsr = hw->rsr & UART_UARTRSR_BITS;
     if (rsr != 0u) {
-        rx_error_count++;
+        s_stats.uart_errors++;
         hw->rsr = rsr;
     }
 
-    // 读指针追 DMA 写指针；gap 超环半 = 消费端停摆被写穿 → 跳写指针复位解析
-    uint32_t wpos = (uint32_t)(dma_hw->ch[UART_RX_DMA].write_addr - (uintptr_t)uart_rx_ring);
-    uint32_t gap = (wpos - uart_rx_tail) & (UART_RX_RING_SIZE - 1u);
-    if (gap >= UART_RX_RING_SIZE / 2u) {
-        rx_overflow_count += gap;
-        uart_rx_tail = wpos;
+    uint32_t remaining = dma_hw->ch[UART_RX_DMA].transfer_count & UART_RX_DMA_MASK;
+    uint32_t produced = (UART_RX_DMA_PERIOD - remaining) & UART_RX_DMA_MASK;
+    uint32_t gap = (produced - uart_rx_tail) & UART_RX_DMA_MASK;
+    __compiler_memory_barrier();  // DMA 发布计数后，再读取已经写入的缓冲
+    if (gap >= UART_RX_RING_SIZE) {
+        s_stats.ring_discard_bytes += gap;
+        uart_rx_tail = produced;
+        s_rx_seq_valid = false;
         slip_reset();
-        return;
+        gap = 0;
     }
 
-    while (uart_rx_tail != wpos) {
-        slip_process_byte(uart_rx_ring[uart_rx_tail]);
-        uart_rx_tail = (uart_rx_tail + 1u) & (UART_RX_RING_SIZE - 1u);
+    // 每轮有预算，持续上行也给 USB Device 和其他任务留出执行机会。
+    if (gap > UART_RX_TASK_BUDGET) gap = UART_RX_TASK_BUDGET;
+    while (gap-- > 0u) {
+        slip_process_byte(uart_rx_ring[uart_rx_tail & (UART_RX_RING_SIZE - 1u)]);
+        uart_rx_tail = (uart_rx_tail + 1u) & UART_RX_DMA_MASK;
     }
 
     // 半帧超时：主机断发留下半帧时尽快放弃重新同步
     if (s_slip.in_frame && s_slip.last_byte_us != 0u &&
         time_us_64() - s_slip.last_byte_us >= UART_RX_FRAME_TIMEOUT_US) {
+        s_stats.frame_errors++;
         slip_reset();
     }
 
@@ -233,8 +254,9 @@ void uart_proto_task(void)
 void uart_proto_init(void)
 {
     uart_rx_tail = 0;
-    rx_overflow_count = 0;
-    rx_error_count = 0;
+    memset(&s_stats, 0, sizeof s_stats);
+    s_dma_started = false;
+    s_rx_seq_valid = false;
     slip_reset();
     s_tx_seq = 0;
 
@@ -245,6 +267,7 @@ void uart_proto_init(void)
     // RX DMA：读 = UART DR（定址），写 = 环形缓冲（地址回绕），DREQ 在 FIFO
     // 非空期间持续有效 → 字节一到即被搬走。延迟启动：boot 期 flash 操作期间
     // 通道空闲，由 uart_proto_task 的守护在就绪后触发。
+    dma_channel_claim(UART_RX_DMA);
     dma_channel_config c = dma_channel_get_default_config(UART_RX_DMA);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_read_increment(&c, false);
@@ -254,7 +277,7 @@ void uart_proto_init(void)
     channel_config_set_irq_quiet(&c, true);
     dma_channel_configure(UART_RX_DMA, &c, uart_rx_ring,
                           &uart_get_hw(DEBUG_UART)->dr,
-                          dma_encode_transfer_count_with_self_trigger(UART_RX_RING_SIZE),
+                          dma_encode_transfer_count_with_self_trigger(UART_RX_DMA_PERIOD),
                           false);        // 不立即启动（见上）
 
     // RX 中断全部关闭（DMA 搬运不需要）；TX 本就无中断（阻塞写）
@@ -267,4 +290,9 @@ void uart_proto_init(void)
 uint32_t uart_proto_drops(void)
 {
     return g_uart_chan.drops;
+}
+
+uart_proto_stats_t uart_proto_stats(void)
+{
+    return s_stats;
 }
