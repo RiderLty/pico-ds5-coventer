@@ -51,8 +51,7 @@
 // 单条记录负载上限（字节）
 #define INQ_REC_MAX   16u
 
-// 初始化队列与临界区。必须在 multicore_launch_core1() 之前调用：
-// 生产者（core1）随时可能入队，自旋锁必须先就绪。
+// 初始化原子 SPSC 索引，必须在 multicore_launch_core1() 之前调用。
 void input_queue_init(void);
 
 // 入队一块带 kind 标签的数据（负载 ≤ INQ_REC_MAX，超限截断）。

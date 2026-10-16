@@ -77,7 +77,8 @@ Device FIFO 的竞态——**不要在 core1 或 Lua 里调 `tud_*` 或改写描
 
 启动顺序有硬性依赖：`debug_init()` → `input_queue_init()` → `usb_km_init()` →
 `lua_script_init()` → 两核各自 `flash_safe_execute_core_init()`（core0 在启动 core1 前完成）。
-队列临界区必须经 SDK 初始化且在 core1 启动前就绪
+DS5/BOOT 事件环和脚本 mailbox 以原子 acquire/release 交接所有权，不取自旋锁；
+键鼠/协议环仍用 SDK 临界区。全部须在 core1 启动前初始化
 （生产者随时可能入队）；core1 栈用 `multicore_launch_core1_with_stack` 扩到 16KB
 （默认 2KB 不够 Lua 解析器）。
 
@@ -153,8 +154,9 @@ C 注册函数，一律以**目标**为前缀：`kbd_`（宿主键盘）/ `mouse
   `critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num())`。
 - **锁号撞号**：`spin_lock_init(固定 ID)` 不入池登记，会与后续 `critical_section_init`
   领到的锁撞号并自锁。须用 `spin_lock_claim_unused(true)` 正式领取（见 `debug.c`）。
-- **独占锁池容量**：24..31 只有 8 把，debug（1）、input_queue（1）、TinyUSB Host
-  （3）、Device（2）和原生 USB 控制器（1）在启动时已用满。新增短临界区须用
+- **独占锁池容量**：24..31 只有 8 把；原先 debug（1）、input_queue（1）、TinyUSB Host
+  （3）、Device（2）和原生 USB 控制器（1）在启动时已用满；input_queue 改用原子
+  SPSC 后释放了其中一把。新增短临界区优先用
   `critical_section_init_with_lock_num(..., next_striped_spin_lock_num())`，否则
   `critical_section_init()` 申请第 9 把会在 USB 初始化时 panic（BOOTSEL 队列曾触发）。
 - **GPIO 复用 FUNCSEL**：RP2350 上 GPIO2/3 的 UART0 功能在 FUNCSEL 11

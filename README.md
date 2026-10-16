@@ -119,7 +119,7 @@ hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个�
 | `on_touchpad(meta, dims, x0, y0, x1, y1)` | DS5 触摸板快照（2 个触点，meta bit0/bit1 触点在位） |
 | `on_boot_button(pressed)` | 板载 BOOTSEL 按键（按下 true / 抬起 false，设备侧消抖）；返回 true 拦截默认行为，否则释放时开启 WinUSB，键盘和鼠标保持不变 |
 | `on_dropped(slot, vid, pid)` | 设备被丢弃通知 |
-| `tick(dt_us)` | 周期回调（dt = 距上次微秒差） |
+| `tick(dt_us)` | 周期回调，默认至少间隔 1000us（最高 1000Hz）；dt 为实际回调间隔，首个为 0 |
 
 `hidkit.info()` 输出登记表，`hidkit.BTN_*` 等提供语义常量。
 

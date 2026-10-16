@@ -129,6 +129,10 @@ AI_READ 每块重新读取 KV，客户端对完整结果做 CRC 校验；读取�
 DELETE 仅删除 `lua.script`，AI 配置保持原样。所有 KV 和脚本操作在 core1 执行，回复交回 core0 发送；RESET 会丢弃尚未执行的旧会话操作和旧回复，
 已经开始的操作不会回滚。
 
+跨核 mailbox 用 acquire/release 原子状态交接数据所有权：core0 提交请求和发送回复，
+core1 执行脚本/KV 操作。没有任务时只检查状态，不取锁、不关中断；回复出口暂忙时
+保留当前回复，期间新请求仍返回 BUSY。
+
 | STATUS 字段 | 含义 |
 | --- | --- |
 | `maxSize` / `partitionSize` | 61440 / 524288 字节 |
@@ -151,6 +155,7 @@ DELETE 仅删除 `lua.script`，AI 配置保持原样。所有 KV 和脚本操�
 
 ```bash
 python3 tools/test_lua_scripts.py
+python3 tools/test_core_queues.py
 python3 tools/test_ds5_touch.py
 node tools/test_pico_device.mjs
 node tools/test_web_protocol.mjs

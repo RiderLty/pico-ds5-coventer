@@ -5,6 +5,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Lua tick 最小调用间隔（微秒）；可在编译时覆盖，默认最高 1000Hz。
+#ifndef LUA_TICK_INTERVAL_US
+#define LUA_TICK_INTERVAL_US 1000u
+#endif
+#if LUA_TICK_INTERVAL_US < 1
+#error "LUA_TICK_INTERVAL_US must be positive"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,8 +82,9 @@ bool lua_binder_on_boot_button(bool pressed);
 
 //--- 周期处理 ----------------------------------------------------------
 
-// 调用 Lua 的 tick(dt_us)，dt = 距上次调用的微秒差（内部计时）。
-// core1 主循环每轮调用（不节流）；脚本未定义 tick 时只有一次整数比较。
+// core1 每轮检查，间隔达到 LUA_TICK_INTERVAL_US 才调用 Lua 的 tick(dt_us)。
+// 首次也等待该间隔且 dt=0，之后 dt 为实际回调间隔；延迟时不补调。
+// 未到时间、未定义 tick 或调用失败时返回 false。
 bool lua_binder_process(void);
 
 //--- 诊断 ------------------------------------------------------------

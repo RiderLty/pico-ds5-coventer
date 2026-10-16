@@ -36,7 +36,7 @@ static int g_lid_on_dropped     = -1;
 static int g_lid_on_boot_button = -1;
 static int g_lid_tick           = -1;
 
-// tick 的 dt 计时：距上次 lua_binder_process 的微秒差（首个 tick 记 0）
+// tick 的限频及 dt 计时：距上次实际回调的微秒差（首个 tick 记 0）
 static uint64_t g_last_tick_us = 0;
 static bool     g_tick_primed  = false;
 
@@ -91,7 +91,8 @@ bool lua_binder_init(const char *script, size_t len) {
     memset(s_tp_last_x, 0, sizeof(s_tp_last_x));
     memset(s_tp_last_y, 0, sizeof(s_tp_last_y));
 
-    // 新 VM：首个 tick 的 dt 从 0 起
+    // 新 VM：重新等待一个 tick 间隔，首个 tick 的 dt 从 0 起
+    g_last_tick_us = time_us_64();
     g_tick_primed = false;
 
     return true;
@@ -244,8 +245,10 @@ bool lua_binder_on_boot_button(bool pressed) {
 bool lua_binder_process(void) {
     if (g_lid_tick < 0) return false;
     uint64_t now = time_us_64();
+    uint64_t elapsed = now - g_last_tick_us;
+    if (elapsed < LUA_TICK_INTERVAL_US) return false;
     // dt = 距上次 tick 的微秒差（首个 tick 为 0）。now 单调(uint64)，dt 恒非负
-    uint64_t dt = g_tick_primed ? (now - g_last_tick_us) : 0;
+    uint64_t dt = g_tick_primed ? elapsed : 0;
     g_last_tick_us = now;
     g_tick_primed  = true;
     // dt 可能超 INT32_MAX（约 35.8 分钟），钳制避免截断为负

@@ -16,7 +16,6 @@
 #include "hardware/structs/sio.h"    // sio_hw->gpio_hi_in（可观测 QSPI 引脚）
 #include "hardware/sync.h"           // save_and_disable_interrupts
 #include "pico/multicore.h"          // multicore_lockout_*
-#include "pico/sync.h"               // critical_section
 #include "pico/time.h"               // time_us_64
 
 #include "debug.h"
@@ -24,46 +23,39 @@
 #include "usb_km.h"
 
 /*--------------------------------------------------------------------+
- * core0 → core1：按键事件环（单生产者单消费者，临界区保护）
+ * core0 → core1：按键事件环（单生产者单消费者，原子索引发布）
  *--------------------------------------------------------------------*/
 
 #define BOOT_EVENT_DEPTH 8u
 
-static critical_section_t s_cs;
-static uint8_t s_head, s_tail, s_count;
+_Static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0), "SPSC requires lock-free 32-bit atomics");
+
+static uint32_t s_head, s_tail;
 static bool    s_events[BOOT_EVENT_DEPTH];
 
 void boot_button_init(void)
 {
-    // 启动时独占锁池（24..31）已由 debug、input_queue 与 TinyUSB 用满。
-    // 此短临界区使用 SDK 条带锁，避免第九次独占申请让 USB 初始化 panic。
-    critical_section_init_with_lock_num(&s_cs, next_striped_spin_lock_num());
-    s_head = s_tail = s_count = 0;
+    // 仅在启动 core1 前初始化；运行期两核各自只修改自己的索引。
+    __atomic_store_n(&s_head, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_tail, 0u, __ATOMIC_RELAXED);
 }
 
 static void push_event(bool pressed)
 {
-    critical_section_enter_blocking(&s_cs);
-    if (s_count < BOOT_EVENT_DEPTH) {
-        s_events[s_tail] = pressed;
-        s_tail = (uint8_t)((s_tail + 1u) % BOOT_EVENT_DEPTH);
-        s_count++;
-    }
-    critical_section_exit(&s_cs);
+    uint32_t tail = __atomic_load_n(&s_tail, __ATOMIC_RELAXED);
+    uint32_t head = __atomic_load_n(&s_head, __ATOMIC_ACQUIRE);
+    if ((uint32_t)(tail - head) == BOOT_EVENT_DEPTH) return;
+    s_events[tail & (BOOT_EVENT_DEPTH - 1u)] = pressed;
+    __atomic_store_n(&s_tail, tail + 1u, __ATOMIC_RELEASE);
 }
 
 void boot_button_process(void)
 {
     for (;;) {
-        critical_section_enter_blocking(&s_cs);
-        if (s_count == 0) {
-            critical_section_exit(&s_cs);
-            return;
-        }
-        bool pressed = s_events[s_head];
-        s_head = (uint8_t)((s_head + 1u) % BOOT_EVENT_DEPTH);
-        s_count--;
-        critical_section_exit(&s_cs);
+        uint32_t head = __atomic_load_n(&s_head, __ATOMIC_RELAXED);
+        if (head == __atomic_load_n(&s_tail, __ATOMIC_ACQUIRE)) return;
+        bool pressed = s_events[head & (BOOT_EVENT_DEPTH - 1u)];
+        __atomic_store_n(&s_head, head + 1u, __ATOMIC_RELEASE);
 
         bool handled = lua_binder_on_boot_button(pressed);
         // BOOTSEL 释放默认开启 WinUSB，键盘和鼠标目标保持不变。

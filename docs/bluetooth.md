@@ -45,6 +45,21 @@ Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行�
 ./build.sh --waveshare --skip-setup # 已准备依赖时增量构建
 ```
 
+core1 循环耗时诊断版：
+
+```bash
+./build.sh --waveshare --skip-setup --build-dir build-waveshare-timing -- -DCORE1_TIMING=ON
+```
+
+每秒一行 `[C1 max_us]`，按调用顺序输出 `ds5_bt_task`、`input_app_task`、
+`lua_script_process`、`boot_button_process`、`lua_binder_process` 在本统计窗口内
+单次调用的最大耗时（µs），打印后清零。计时包含中断、锁等待和跨核暂停；
+统计日志自身不计入这五个函数。函数未返回时无法打印下一行。正常构建默认关闭此诊断。
+
+DS5 输出事件环（core1 → core0）、BOOT 事件环（core0 → core1）和脚本 mailbox
+使用原子 SPSC 所有权交接，不在空闲循环中关中断抢锁。键鼠队列的合并/清空和
+协议日志的多生产者写入仍由临界区保护。BOOTSEL 读取仍须暂停另一核以保护 XIP。
+
 | 目标参数 | CMake 板型 | 默认构建目录 |
 |---|---|---|
 | 无参数 / `--usb` | `pico2` | `build` |

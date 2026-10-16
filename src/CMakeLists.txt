@@ -42,6 +42,15 @@ add_dependencies(${target_name} embed_lua_script)
 target_link_options(${target_name} PRIVATE -Xlinker --print-memory-usage)
 target_compile_options(${target_name} PRIVATE -Wall -Wextra)
 
+option(CORE1_TIMING "Print core1 per-function maximum elapsed times every second" OFF)
+target_compile_definitions(${target_name} PRIVATE CORE1_TIMING=$<BOOL:${CORE1_TIMING}>)
+
+set(LUA_TICK_INTERVAL_US 1000 CACHE STRING "Minimum Lua tick callback interval (us)")
+if(NOT LUA_TICK_INTERVAL_US MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "LUA_TICK_INTERVAL_US must be a positive integer")
+endif()
+target_compile_definitions(${target_name} PRIVATE LUA_TICK_INTERVAL_US=${LUA_TICK_INTERVAL_US})
+
 # use tinyusb implementation
 target_compile_definitions(${target_name} PRIVATE PIO_USB_USE_TINYUSB)
 

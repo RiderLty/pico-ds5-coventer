@@ -59,6 +59,23 @@ void lua_core_debug_cb(const char *msg)
   DEBUG("[DS5C]%s\n", msg);
 }
 
+#if CORE1_TIMING
+#if ENABLE_DS5_BT
+#define CORE1_INPUT_NAME "ds5_bt_task"
+#else
+#define CORE1_INPUT_NAME "tuh_task"
+#endif
+// Wall time includes IRQs, lock waits and pauses imposed by core0.
+#define CORE1_CALL(index, call) do { \
+  uint32_t c1_start_us = time_us_32(); \
+  call; \
+  uint32_t c1_elapsed_us = time_us_32() - c1_start_us; \
+  if (c1_elapsed_us > c1_max_us[index]) c1_max_us[index] = c1_elapsed_us; \
+} while (0)
+#else
+#define CORE1_CALL(index, call) do { call; } while (0)
+#endif
+
 // core1: 处理 USB Host 事件
 void core1_main(void) {
   flash_safe_execute_core_init();
@@ -106,16 +123,33 @@ void core1_main(void) {
 
   DEBUG("[DS5C] core1 input ready (bluetooth=%d)\n", ENABLE_DS5_BT);
 
+#if CORE1_TIMING
+  uint32_t c1_max_us[5] = {0};
+  uint32_t c1_report_us = time_us_32();
+#endif
   while (true) {
 #if ENABLE_DS5_BT
-    ds5_bt_task();
+    CORE1_CALL(0, ds5_bt_task());
 #else
-    tuh_task();
+    CORE1_CALL(0, tuh_task());
 #endif
-    input_app_task();   // Switch Pro 握手状态机（须与 tuh 回调同核同循环）
-    lua_script_process();
-    boot_button_process();  // 板载 BOOTSEL 事件（core0 消抖后经跨核队列送来）
-    lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（不节流，dt 兜时差）
+    CORE1_CALL(1, input_app_task());   // Switch Pro 握手状态机（须与 tuh 回调同核同循环）
+    CORE1_CALL(2, lua_script_process());
+    CORE1_CALL(3, boot_button_process());  // 板载 BOOTSEL 事件（core0 消抖后经跨核队列送来）
+    CORE1_CALL(4, lua_binder_process());   // 每轮检查 Lua tick，默认至少间隔 1000us
+#if CORE1_TIMING
+    uint32_t now_us = time_us_32();
+    if ((uint32_t)(now_us - c1_report_us) >= 1000000u) {
+      c1_report_us = now_us;
+      DEBUG("[C1 max_us] " CORE1_INPUT_NAME "=%lu "
+            "input_app_task=%lu lua_script_process=%lu "
+            "boot_button_process=%lu lua_binder_process=%lu\n",
+            (unsigned long)c1_max_us[0], (unsigned long)c1_max_us[1],
+            (unsigned long)c1_max_us[2], (unsigned long)c1_max_us[3],
+            (unsigned long)c1_max_us[4]);
+      for (unsigned i = 0; i < 5; ++i) c1_max_us[i] = 0;
+    }
+#endif
   }
 }
 
@@ -137,8 +171,7 @@ int main(void) {
 
   debug_init();
 
-  // 初始化跨核队列与临界区。必须先于 core1 启动：
-  // 生产者随时可能入队，自旋锁必须先就绪
+  // 初始化跨核 SPSC 队列。生产者随时可能入队，必须先于 core1 启动。
   input_queue_init();
   // BOOTSEL 事件队列（core0 → core1）同理，须在 core1 启动前就绪
   boot_button_init();

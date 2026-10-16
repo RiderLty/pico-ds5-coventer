@@ -63,6 +63,8 @@ jobs:
         run: python3 tools/test_ds5_bt.py
       - name: Test Lua lifecycle and touch callbacks
         run: python3 tools/test_lua_scripts.py
+      - name: Test cross-core SPSC queues
+        run: python3 tools/test_core_queues.py
       - name: Test WinUSB short replies
         run: python3 tools/test_usb_io.py
       - name: Prepare release assets

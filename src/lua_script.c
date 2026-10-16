@@ -5,14 +5,14 @@
 #include "input_app.h"
 #include "usb_km.h"
 #include "kvstore.h"
-#include "pico/critical_section.h"
 #include "pico/time.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
-static critical_section_t s_lock;
-// One bounded mailbox. No locks are held during Lua, KV or USB calls.
+_Static_assert(__atomic_always_lock_free(sizeof(unsigned), 0), "Mailbox requires lock-free atomics");
+
+// core0 独占提交/收回复，core1 独占执行；原子状态发布下一阶段的数据所有权。
 static struct {
     unsigned state; // 0 idle, 1 request, 2 executing, 3 reply
     proto_chan_t *ch;
@@ -98,7 +98,7 @@ static bool read_saved(bool requested) {
 }
 
 void lua_script_init(void) {
-    critical_section_init_with_lock_num(&s_lock, next_striped_spin_lock_num());
+    __atomic_store_n(&s_job.state, 0u, __ATOMIC_RELAXED);
 }
 void lua_script_boot(void) {
     s_boot_loading = true;
@@ -113,14 +113,13 @@ void lua_script_request(proto_chan_t *ch, uint16_t id, const uint8_t *data, uint
         proto_chan_submit(ch, PROTO_CMD_ERROR, id, error, sizeof error);
         return;
     }
-    critical_section_enter_blocking(&s_lock);
-    bool busy = s_job.state != 0;
+    bool busy = __atomic_load_n(&s_job.state, __ATOMIC_ACQUIRE) != 0;
     if (!busy) {
         s_job.ch=ch; s_job.id=id;
         s_job.generation=__atomic_load_n(&ch->generation, __ATOMIC_ACQUIRE);
-        s_job.len=len; memcpy(s_job.data,data,len); s_job.state=1;
+        s_job.len=len; memcpy(s_job.data,data,len);
+        __atomic_store_n(&s_job.state, 1u, __ATOMIC_RELEASE);
     }
-    critical_section_exit(&s_lock);
     if (busy) {
         uint8_t error[] = {PROTO_CMD_SCRIPT, PROTO_ERR_BUSY};
         proto_chan_submit(ch, PROTO_CMD_ERROR, id, error, sizeof error);
@@ -231,15 +230,13 @@ void lua_script_process(void) {
     // Expire abandoned uploads even if the owner never sends another request.
     if (s_upload && s_owner && (time_us_64()-s_upload_time > 30000000u ||
         __atomic_load_n(&s_owner->generation, __ATOMIC_ACQUIRE) != s_owner_generation)) discard_upload();
-    critical_section_enter_blocking(&s_lock);
-    bool pending=s_job.state==1;
-    if (pending && __atomic_load_n(&s_job.ch->generation, __ATOMIC_ACQUIRE) != s_job.generation) {
-        s_job.state=0;
-        pending=false; // reset before execution: do not run a stale SAVE/RUN
+    if (__atomic_load_n(&s_job.state, __ATOMIC_ACQUIRE) != 1u) return;
+    if (__atomic_load_n(&s_job.ch->generation, __ATOMIC_ACQUIRE) != s_job.generation) {
+        // 交还所有权后 core1 不再访问本次 job，避免执行旧会话的 SAVE/RUN。
+        __atomic_store_n(&s_job.state, 0u, __ATOMIC_RELEASE);
+        return;
     }
-    if (pending) s_job.state=2;
-    critical_section_exit(&s_lock);
-    if (!pending) return;
+    __atomic_store_n(&s_job.state, 2u, __ATOMIC_RELAXED);
     s_job.error=execute();
     if (s_job.error==PROTO_ERR_SCRIPT || s_job.error==PROTO_ERR_STORAGE) {
         // Extended ERROR body: [cmd][code][UTF-8 diagnostic].
@@ -248,15 +245,12 @@ void lua_script_process(void) {
     } else if (s_job.error) {
         s_job.data[0]=PROTO_CMD_SCRIPT; s_job.data[1]=s_job.error; s_job.len=2;
     }
-    critical_section_enter_blocking(&s_lock); s_job.state=3; critical_section_exit(&s_lock);
+    __atomic_store_n(&s_job.state, 3u, __ATOMIC_RELEASE);
 }
 void lua_script_task(void) {
-    critical_section_enter_blocking(&s_lock);
-    bool ready=s_job.state==3;
-    critical_section_exit(&s_lock);
-    if (!ready) return;
+    if (__atomic_load_n(&s_job.state, __ATOMIC_ACQUIRE) != 3u) return;
     if (s_job.ch->active && s_job.ch->generation==s_job.generation &&
         !proto_chan_submit(s_job.ch,s_job.error?PROTO_CMD_ERROR:PROTO_CMD_SCRIPT,
                            s_job.id,s_job.data,s_job.len)) return;
-    critical_section_enter_blocking(&s_lock); s_job.state=0; critical_section_exit(&s_lock);
+    __atomic_store_n(&s_job.state, 0u, __ATOMIC_RELEASE);
 }

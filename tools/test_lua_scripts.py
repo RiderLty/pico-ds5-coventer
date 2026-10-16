@@ -37,7 +37,7 @@ def main():
         executable = tmp / "test"
         subprocess.run([
             os.environ.get("CC", "cc"), "-std=gnu11", "-O1", "-g",
-            "-DLUA_USE_APICHECK",
+            "-DLUA_USE_APICHECK", "-pthread",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             "-I", str(tmp), "-I", str(ROOT / "src"), "-I", str(lua),
             "-I", str(kv / "include"), "-I", str(ROOT / "lib/hidkit/include"),

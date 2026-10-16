@@ -1,5 +1,7 @@
 // Actual script state machine, Lua VM and KV; only the hardware is mocked.
 #include <assert.h>
+#include <pthread.h>
+#include <sched.h>
 #include "../src/lua_script.c"
 #include "lua_core.h"
 #include "blockdevice/flash.h"
@@ -47,7 +49,8 @@ static unsigned erases, programs, releases;
 static unsigned flash_devices;
 static int fail_program_after = -1;
 static uint64_t now;
-uint64_t time_us_64(void) { return now += 1000; }
+static uint64_t time_step = 1000;
+uint64_t time_us_64(void) { return now += time_step; }
 void lua_core_debug_cb(const char *s) { (void)s; }
 void input_app_release_outputs(void) { ++releases; }
 static int noop(lua_State *L) { (void)L; return 0; }
@@ -97,8 +100,10 @@ static proto_chan_t channel={.active=true}, other={.active=true};
 static uint8_t reply[512], reply_cmd;
 static uint16_t reply_size;
 static unsigned replies;
+static bool block_reply;
 bool proto_chan_submit(proto_chan_t *ch,uint8_t cmd,uint16_t id,const uint8_t *p,uint16_t n) {
     (void)ch; assert(id==1); assert(n<=512);
+    if (block_reply) return false;
     memcpy(reply,p,n); reply_size=n; reply_cmd=cmd; ++replies; return true;
 }
 static uint8_t request(const uint8_t *p, unsigned n) {
@@ -120,6 +125,33 @@ static void upload_kind(const char *source,unsigned n,uint8_t kind) {
 }
 static void upload(const char *s,unsigned n) { upload_kind(s,n,1); }
 static void run(const char *s) { upload(s,strlen(s)); assert(!op(3)); }
+
+// 真正的双线程运行 mailbox，检查发布/复用 512 字节缓冲的所有权。
+static unsigned worker_stop;
+static void *mailbox_worker(void *arg) {
+    (void)arg;
+    while (!__atomic_load_n(&worker_stop, __ATOMIC_ACQUIRE)) {
+        lua_script_process();
+        sched_yield();
+    }
+    return NULL;
+}
+static void test_concurrent_mailbox(void) {
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, mailbox_worker, NULL));
+    for (unsigned i=0; i<20000; ++i) {
+        // 每次偏移不同，检查不会把上次回复或未发布完的字段当成本次请求。
+        unsigned offset=i%(s_size-512u+1u);
+        uint8_t body[7]={5}; put32(body+1, offset); body[5]=0; body[6]=2;
+        unsigned old=replies;
+        lua_script_request(&channel, 1, body, sizeof body);
+        while (replies==old) { lua_script_task(); sched_yield(); }
+        assert(reply_cmd==PROTO_CMD_SCRIPT && reply_size==512);
+        assert(!memcmp(reply, s_image+offset, 512));
+    }
+    __atomic_store_n(&worker_stop, 1u, __ATOMIC_RELEASE);
+    assert(!pthread_join(worker, NULL));
+}
 
 int main(void) {
     usb_km_init();
@@ -150,6 +182,33 @@ int main(void) {
         assert(lua_core_dostring("assert(touch_calls==3 and touch_args.n==6 and touch_args[1]==0)"));
     }
     assert(!op(6)); // restore default before the remaining lifecycle tests
+    // A controlled clock verifies the boundary, real dt, no catch-up, and reload reset.
+    time_step=0;
+    for (unsigned reload=0; reload<2; ++reload) {
+        run("ticks={}; function tick(dt) ticks[#ticks+1]=dt end");
+        assert(!lua_binder_process());
+        now+=LUA_TICK_INTERVAL_US-1;
+        assert(!lua_binder_process());
+        assert(lua_core_dostring("assert(#ticks==0)"));
+        ++now;
+        assert(lua_binder_process());
+        assert(lua_core_dostring("assert(#ticks==1 and ticks[1]==0)"));
+        now+=LUA_TICK_INTERVAL_US-1;
+        assert(!lua_binder_process());
+        ++now;
+        assert(lua_binder_process());
+        assert(lua_core_dostring("assert(#ticks==2)"));
+        char interval_assertion[80];
+        snprintf(interval_assertion,sizeof interval_assertion,"expected_interval=%llu",(unsigned long long)LUA_TICK_INTERVAL_US);
+        assert(lua_core_dostring(interval_assertion));
+        assert(lua_core_dostring("assert(ticks[2]==expected_interval)"));
+        now+=5u*LUA_TICK_INTERVAL_US;
+        assert(lua_binder_process());
+        assert(!lua_binder_process());
+        assert(lua_core_dostring("assert(#ticks==3 and ticks[3]==5*expected_interval)"));
+    }
+    time_step=1000;
+    assert(!op(6));
     const char good[]="function on_key(k,d) seen=k end; function on_boot_button(p) boot=p; boots=(boots or 0)+1; return p end; marker=42";
     upload(good,strlen(good));
     assert(s_image==s_default_image && programs==initial_programs);
@@ -219,6 +278,13 @@ int main(void) {
     lua_script_request(&channel,1,&save,1);channel.generation++;
     lua_script_process();lua_script_task();
     assert(programs==writes && replies==count && !op(0));
+    // 出口暂忙时保留回复和 job 所有权；新请求必须 BUSY，重试回复不被覆盖。
+    lua_script_request(&channel,1,&status,1); lua_script_process();
+    block_reply=true; lua_script_task(); block_reply=false;
+    assert(__atomic_load_n(&s_job.state,__ATOMIC_ACQUIRE)==3u);
+    lua_script_request(&other,1,&reset,1);
+    assert(reply_cmd==PROTO_CMD_ERROR && reply[1]==PROTO_ERR_BUSY);
+    lua_script_task(); assert(reply_cmd==PROTO_CMD_SCRIPT);
     upload("a=1",3);now+=31000000;
     lua_script_process();assert(!s_upload); // timeout releases RAM without another request
     // Maximum-sized script, repeated saves and garbage collection.
@@ -249,6 +315,7 @@ int main(void) {
     assert(!lua_store_save("function invalid(",17));
     lua_store_deinit();
     assert(flash_devices==0);
+    puts("PASS: mailbox reply backpressure/BUSY and 20000 concurrent 512-byte replies");
     lua_script_boot();assert(s_image==s_default_image && lua_binder_is_ready());
     assert(s_saved && s_dirty && strstr(s_error,"script"));
     // Boot applies the final top-level target before Device initialization.
@@ -286,6 +353,7 @@ int main(void) {
         assert(disconnects==2 && connects==2 && slept==1000);
     }
     assert(releases>10);
+    test_concurrent_mailbox();
     lua_binder_deinit();discard_upload();free(s_owned);
     lua_store_deinit();
     assert(flash_devices==0);

@@ -24,7 +24,7 @@
  *   boot_button_process() core1 主循环（须与 Lua VM 同核）
  */
 
-void boot_button_init(void);      // core0：初始化跨核队列与临界区
+void boot_button_init(void);      // core0：初始化跨核队列，须早于 core1 启动
 void boot_button_poll(void);      // core0：读引脚 + 消抖 + 投递事件
 void boot_button_process(void);   // core1：排空事件并转发 Lua
 
