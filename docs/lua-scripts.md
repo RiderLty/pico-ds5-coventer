@@ -15,6 +15,9 @@ KV 没有独立的固定 value 长度上限，受 bank 可用空间限制：分�
 
 - 启动先读 KV，把源码复制到 RAM 后创建 VM。KV 不存在、不可读、源码超长，或脚本
   编译 / 顶层执行失败时，复制固件内的 `scripts/default.lua` 到 RAM 并运行。
+- USB Device 等待启动脚本顶层全部执行完成，再应用最终 `dev_enable` 目标并连接主机。
+  多次调用合并为首次枚举配置，无需断开重连；回退默认脚本前清除失败脚本的部分能力请求。
+  此时尚不执行 Host 事件和 `tick`，两核等待时保留 IRQ 以支持 KV Flash 安全操作。
 - BEGIN / WRITE 只上传到临时 RAM，不影响正在运行的脚本，不写 Flash。
 - RUN 验证长度和 CRC 后重建 VM，运行上传源码，成功后把它作为当前 RAM 镜像。
   语法错误、顶层运行错误或顶层执行超时会恢复预制脚本；KV 中旧脚本保留。
@@ -46,10 +49,54 @@ console.log(await device.scriptError());
 
 各方法支持 `{ timeoutMs, signal }`，默认每条脚本请求超时 30 秒。同一 PicoDevice 的
 脚本操作串行，分块事务绑定当前连接，断线重连后旧事务不能继续。两种端口支持同一
-协议。自定义脚本若关闭或不启用 WinUSB IO，重启后须通过 UART 操作，或让脚本通过
-`dev_enable(-1, -1, 1)` 启用 IO（`-1` = 保持其余接口不变）。运行中改变接口布局也可能断开 WebUSB。
+协议。WinUSB IO 未启用时，可在运行中按下再松开 BOOT 启用；若自定义脚本拦截了该默认行为，
+可通过 UART 操作，或让脚本调用 `dev_enable(-1, -1, 1)` 启用 IO（`-1` = 保持其余接口不变）。
+运行中改变接口布局也可能断开 WebUSB。
 
-板载 `on_boot_button(pressed)` 回调在默认行为前执行。返回 `true` 会拦截默认行为；返回 `false`、不返回值或未定义时，释放按键会调用 `dev_enable(-1, -1, 1)` 开启 WinUSB，并保持键盘和鼠标设置不变。
+## 首次枚举与运行期接口启用
+
+希望插上主机就包含键盘、鼠标和 WinUSB，可在脚本顶层直接写：
+
+```lua
+dev_enable(1, 1, 1)
+```
+
+通过网页上传运行并保存到设备后，重新上电即可。第一次枚举直接使用该配置，不会先以
+DS5 基线枚举再断开。运行中上传脚本仍按运行期处理，改变配置会重枚举；只有保存后
+下次上电才影响下一次首次枚举。不需要添加固定启动延时。
+
+顶层 `dev_enable` 只是提交目标，顶层全部结束后才应用；`*_is_on()` 此时仍是已应用状态，
+不要在顶层循环等待其变化。`tick`、输入回调和 BOOT 回调在 USB 启动后执行，所产生的
+配置变更仍走热重载。相同目标不会重枚举。
+
+## BOOT 按键与接口启用
+
+预制脚本保留了“启动约 5 秒后启用接口”的完整代码，但已整段注释，默认不会运行。
+该示例累计 `tick(dt_us)` 时间后调用 `dev_enable(1, 1, 1)`，同时开启键盘、鼠标和 WinUSB，
+这是运行期延时示例；计时从脚本 tick 开始，不从主机首次挂载开始。启用会重枚举 USB，断开等待约 0.5 秒，
+期间 DS5 上报暂停。如需恢复，取消脚本文末整个代码块的注释。
+
+默认只需在设备运行中按下再松开 BOOT（BOOTSEL），即可启用 WinUSB。
+板载 `on_boot_button(pressed)` 回调先于默认行为执行，按下为 `true`，松开为 `false`。
+返回 `true` 会拦截本次事件的默认行为；返回 `false`、`nil`、不返回值或未定义时，
+松开按键会请求 `dev_enable(-1, -1, 1)`，键盘和鼠标设置保持不变。
+仅在按下事件返回 `true` 不会拦截之后的松开事件；要自定义接口，松开时也必须返回 `true`。
+
+例如，将默认的 `on_boot_button` 替换为以下回调，松开时开启键盘、保持鼠标不变，并关闭 WinUSB：
+
+```lua
+function on_boot_button(pressed)
+    if not pressed then
+        dev_enable(1, -1, 0)
+    end
+    return true
+end
+```
+
+三个参数可按需改为 `-1`（保持）、`0`（关闭）、`1`（开启）。返回 `true` 只拦截默认动作，
+不会自动启用任何接口；由脚本的 `dev_enable` 决定。此例关闭 WinUSB，后续连接可改用 UART。
+目标接口与当前状态相同时不会重枚举。更新预制脚本不会覆盖 KV 中已有的用户脚本；
+要使用新版预制脚本，需恢复预制并加载到内存，需断电保留时再写入存储。
 
 ## 通信协议
 
@@ -69,11 +116,17 @@ console.log(await device.scriptError());
 | ABORT `8` | `[8]` | 丢弃当前会话的临时上传 |
 | RELOAD_SAVED `9` | `[9]` | 丢弃临时上传，从 KV 加载运行 |
 | ERROR `10` | `[10]` | 最近一次操作错误的 UTF-8 文本，最多 159B；无错误时为空 |
+| AI_STATUS `11` | `[11]` | KV `ai_cfg` 的 JSON 元信息：size / crc32 / maxSize（4096）；未保存时 size=0 |
+| AI_READ `12` | `[12][offset:u32][count:u16]` | AI 配置原始字节，count 为 0..512 |
+| AI_BEGIN `13` | `[13][size:u32][crc32:u32]` | 分配 1..4096B AI 上传缓冲，后续复用 WRITE `2` |
+| AI_SAVE `14` | `[14]` | 完整长度和 CRC 通过后写入 `ai_cfg`，不执行 Lua |
 
 CRC32 使用 IEEE / zlib（多项式 `0xedb88320`，初始值和最终异或 `0xffffffff`），覆盖
-完整源码，无结尾 NUL。上传 30 秒无活动、所属通道 RESET 或 USB 断开后临时镜像失效。
+完整源码或 AI 配置 JSON，无结尾 NUL。上传 30 秒无活动、所属通道 RESET 或 USB 断开后临时镜像失效。
 一次仅允许一个上传方；其他通道可查询 STATUS / READ / ERROR，修改操作返回 BUSY。
-脚本操作在 core1 执行，回复交回 core0 发送；RESET 会丢弃尚未执行的旧会话操作和旧回复，
+AI 与脚本共用一个上传缓冲和同样的会话/超时限制，RUN 不能执行 AI 上传，AI_SAVE 不能保存脚本上传。
+AI_READ 每块重新读取 KV，客户端对完整结果做 CRC 校验；读取期间变更须重试。
+DELETE 仅删除 `lua.script`，AI 配置保持原样。所有 KV 和脚本操作在 core1 执行，回复交回 core0 发送；RESET 会丢弃尚未执行的旧会话操作和旧回复，
 已经开始的操作不会回滚。
 
 | STATUS 字段 | 含义 |
@@ -98,6 +151,7 @@ CRC32 使用 IEEE / zlib（多项式 `0xedb88320`，初始值和最终异或 `0x
 
 ```bash
 python3 tools/test_lua_scripts.py
+python3 tools/test_ds5_touch.py
 node tools/test_pico_device.mjs
 node tools/test_web_protocol.mjs
 python3 tools/test_uart_protocol.py

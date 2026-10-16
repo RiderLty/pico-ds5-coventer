@@ -12,6 +12,21 @@ Callbacks are `on_key(keycode, down)`, `on_mouse_btn(button, down)`, `on_mouse_m
 
 The callback runs before the default action. Return `true` to handle the event yourself. If it returns `false`, `nil`, no value, or is not defined, releasing the button enables the WinUSB interface while leaving the keyboard and mouse settings unchanged.
 
+The default script keeps the five-second auto-enable block commented out. That optional block accumulates `tick(dt_us)` time from script startup, then calls `dev_enable(1, 1, 1)` to enable keyboard, mouse and WinUSB with USB re-enumeration. Uncomment the entire block to restore it. By default, press and release BOOT while the firmware is running to enable WinUSB only.
+
+To choose your own interfaces, replace `on_boot_button` and call `dev_enable` yourself, returning `true` on the release event as well. For example, enable the keyboard, leave the mouse unchanged and disable WinUSB:
+
+```lua
+function on_boot_button(pressed)
+    if not pressed then
+        dev_enable(1, -1, 0)
+    end
+    return true
+end
+```
+
+Returning `true` on press alone does not suppress the later release action. Returning `true` does not enable interfaces by itself.
+
 ## Output
 
 Output functions are plain globals prefixed by their target, mirroring the `on_*` input callbacks:
@@ -26,7 +41,14 @@ Output functions are plain globals prefixed by their target, mirroring the `on_*
 
 ### Host keyboard / mouse / IO
 
-`dev_enable(keyboard, mouse, io)` changes which host-facing interfaces are exposed. Each argument is tri-state: `-1` leaves that interface unchanged, `0` turns it off, `1` turns it on; omitted arguments default to `-1`. It is asynchronous and may briefly re-enumerate USB (the DS5 disappears from the host for ~0.5 s).
+`dev_enable(keyboard, mouse, io)` changes which host-facing interfaces are exposed. Each argument is tri-state: `-1` leaves that interface unchanged, `0` turns it off, `1` turns it on; omitted arguments default to `-1`.
+
+At power-on, the firmware finishes the saved script's top-level code before starting USB. Top-level calls are merged and the final configuration is used for the first enumeration, without disconnecting and reconnecting. For example, put `dev_enable(1, 1, 1)` at top level, run and explicitly save the script to the device, then power-cycle it. No startup timer is needed. A failed startup script's partial requests are cleared before running the default script.
+
+The call remains asynchronous: `kbd_is_on()`, `mouse_is_on()` and `io_is_on()` report the applied configuration, which is only updated after top-level boot code finishes. Do not busy-wait for them at top level. Keyboard/mouse output also remains disabled until the configuration is applied.
+
+Changes from `tick`, input/BOOT callbacks, or uploading/running a script after USB starts use runtime re-enumeration (the DS5 disappears from the host for ~0.5 s).
+If the requested interfaces already match the current configuration, no re-enumeration occurs.
 
 | Function | Description |
 |---|---|
@@ -54,7 +76,7 @@ The DS5 DualSense report is driven entirely by Lua via `pad_*` functions. These 
 |---|---|---|
 | `pad_btn(code, pressed)` | code 0–31, pressed bool | Set/clear a gamepad button in the DS5 button mask. The mask is sent with the next `pad_abs` frame. |
 | `pad_abs(lsx, lsy, rsx, rsy, lt, rt)` | each 0–32767 (clamped), lt/rt 0–32767 (scaled to 0–255) | Update stick axes and trigger values in the DS5 report. Also flushes the current button mask. |
-| `pad_touch(x0, y0, x1, y1, down1, down2)` | x/y 0–65535, down bool | Set up to 2 touch points on the DS5 touchpad (12-bit packed). Points with `down=false` are marked as not touching. |
+| `pad_touch(x0, y0, x1, y1, down1, down2)` | x/y 0–4095 (clamped), down bool | Set up to 2 touch points using native coordinates (DS5 surface: 1920 × 943; no scaling). Each contact has a stable, distinct 7-bit ID; a new press gets a new ID. Release sets bit7 of the contact byte and retains its last coordinates. |
 | `pad_motion(gx, gy, gz, ax, ay, az)` | each int16 (signed) | Set gyroscope (X/Y/Z) and accelerometer (X/Y/Z) values in the DS5 report. |
 | `pad_disconnect()` | — | Clear all pad output (buttons released, axes zeroed, touch/motion reset) and signal device disconnect to the DS5 report. |
 

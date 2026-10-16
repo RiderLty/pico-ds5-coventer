@@ -2,6 +2,8 @@
 -- Pico DS5 转换器 · 板载预制脚本
 --   KV 里没有已存脚本、或已存脚本加载失败时，固件运行这一份。
 --   这一份是**全量直通管线**：把输入原样转给输出，可作为自己写脚本的起点。
+--   默认不再自动启用键鼠 / WinUSB；运行中按下再松开 BOOT 即可启用 WinUSB。
+--   键鼠接口需自行用 dev_enable 开启；文末保留了已注释的 5s 延时启用示例。
 -- ═══════════════════════════════════════════════════════════════════════════
 --
 -- 架构：输入与输出完全解耦，中间只有 Lua。
@@ -35,8 +37,11 @@
 --   dev_enable(kbd, mouse, io)            开关对外接口。三个参数各为三态：
 --                                         -1 = 不修改，0 = 关闭，1 = 开启
 --                                         （省略的参数按 -1）。
---                                         异步生效，需 USB 重枚举（~0.5s，
---                                         期间 DS5 从主机短暂消失）。
+--                                         启动脚本顶层设置用于首次枚举，无需重枚举。
+--                                         运行中异步生效；配置改变会重枚举（~0.5s，
+--                                         期间 DS5 从主机短暂消失）；相同配置不重载。
+--   若想插上 PC 即启用接口，在脚本顶层添加 dev_enable(1, 1, 1)，保存后重新上电。
+--   顶层代码全部执行完才应用配置；不要在顶层循环等待 *_is_on() 变为 true。
 --   kbd_key(keycode, down)                宿主键盘按键（Usage 0x04..0x73，NKRO 全键无冲）
 --   kbd_release_all()                     抬起全部键（防粘键安全阀）
 --   kbd_is_down(keycode)                  查询某键是否按下
@@ -58,7 +63,7 @@
 --   pad_abs(lsx, lsy, rsx, rsy, lt, rt)   手柄轴 / 扳机（±32767 / 0..32767）；
 --                                         同时冲刷当前按键掩码
 --   pad_touch(x0, y0, x1, y1, down1, down2)
---                                         触摸板 2 触点（12-bit 坐标，down = 在位）
+--                                         触摸板 2 触点（坐标 0..4095，DS5 原生 1920×943，不缩放；down = 在位）
 --   pad_motion(gx, gy, gz, ax, ay, az)    六轴（±32767）
 --   pad_disconnect()                      手柄断连帧（清零全部 pad 状态）
 --
@@ -128,13 +133,27 @@ end
 
 -- ── 板载 BOOTSEL 按键 ────────────────────────────────────────────────
 -- 板上唯一的实体按键；core0 消抖后投递，按下 true / 抬起 false。
--- 返回 true 可拦截释放时默认开启 WinUSB；默认无返回值，所以释放时开启 WinUSB。
+-- 默认无返回值，松开时固件会 dev_enable(-1, -1, 1)：开启 WinUSB，键鼠保持不变。
+-- 返回 false、nil 或未定义此回调，也使用相同默认行为。
+-- 可在回调中自行 dev_enable，再返回 true 拦截默认行为；按下、松开分别判断返回值。
+-- 例如将本回调替换为以下代码，松开时仅开启键盘、保持鼠标不变，并关闭 WinUSB：
+-- function on_boot_button(pressed)
+--     if not pressed then
+--         dev_enable(1, -1, 0)
+--     end
+--     return true  -- 松开事件也必须返回 true，才能阻止固件默认开启 WinUSB
+-- end
 function on_boot_button(pressed)
     print("boot button", pressed and "pressed" or "released")
 end
 
--- ── tick：上电 5s 后开启宿主键鼠接口与 IO 通讯接口 ───────────────────
--- 延后 5s 是为了避开开机枚举窗口，重枚举才不会和主机抢时序。
+-- ── 可选示例（已注释）：脚本启动 5s 后启用键鼠与 WinUSB ───────────────
+-- 以下逻辑累计 tick 时间约 5s 后调用 dev_enable(1, 1, 1)，同时开启键盘、鼠标、
+-- WinUSB 通讯接口，触发 USB 重枚举；断开等待约 0.5s，期间 DS5 上报暂停。
+-- 这是可选的运行期延时示例，从脚本 tick 开始计时，不从主机首次挂载计时。
+-- 若希望首次枚举就包含这些接口，直接在脚本顶层调用 dev_enable，无需使用此延时。
+-- 如需恢复自动启用，取消下面整个代码块的注释；当前默认由 BOOT 松开时仅启用 WinUSB。
+--[[
 local boot_us = 0
 local km_started = false
 local KM_DELAY_US = 5 * 1000 * 1000
@@ -149,3 +168,4 @@ function tick(dt_us)
         print("dev_enable requested (re-enumerating, ~0.5s)")
     end
 end
+--]]

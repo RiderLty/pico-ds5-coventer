@@ -9,7 +9,7 @@
     "start": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "npm run test:ai",
+    "test": "node scripts/test-device-workspace.mjs && node scripts/test-usb-reconnect.mjs && npm run test:ai",
     "test:ai": "node scripts/test-ai-context.mjs && node scripts/test-ai-agent.mjs && node scripts/test-ai-scroll.mjs && node scripts/test-ai-safety.mjs",
     "test:browser": "node scripts/test-browser.mjs"
   },

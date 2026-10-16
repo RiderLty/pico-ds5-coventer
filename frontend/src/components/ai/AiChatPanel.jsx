@@ -14,6 +14,7 @@ import UndoIcon from '@mui/icons-material/Undo';
 import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import AiMessageList, { ReasoningBlock } from './AiMessageList';
 import AiSettingsDialog from './AiSettingsDialog';
+import { deviceSession } from '../../utils/deviceSession';
 import { loadAiCfg } from '../../utils/aiSettings';
 import { getAiDocs } from '../../utils/aiDocs';
 import {
@@ -118,11 +119,11 @@ function useThrottledText(intervalMs = STREAM_MIN_INTERVAL_MS) {
     return { text, push, flush, drop, reset };
 }
 
-export default function AiChatPanel({ open, getScript, applyScript, onRunningChange, onUnread, onFoundLines }) {
+export default function AiChatPanel({ disabled = false, open, getScript, applyScript, onRunningChange, onUnread, onFoundLines }) {
     const [, force] = useState(0);
     const rerender = useCallback(() => force((n) => n + 1), []);
     const [input, setInput] = useState('');
-    const [running, setRunning] = useState(isAgentRunning());
+    const [running, setRunning] = useState(false);
     useEffect(() => { onRunningChange?.(running); }, [running, onRunningChange]);
     const stream = useThrottledText();
     const reasoning = useThrottledText();
@@ -145,7 +146,12 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
     // assistant._reasoning，组装请求时被 sanitizeMessage 剥掉，所以看不到也不花钱。
     // 文本由上面的 reasoning = useThrottledText() 提供（同样走前导+尾随节流）。
     const abortRef = useRef(null);
-    useEffect(() => () => abortRef.current?.abort(), []);
+    useEffect(() => {
+        const epoch = deviceSession.epoch;
+        const stop = () => { if (deviceSession.epoch !== epoch || deviceSession.getSnapshot().state !== 'connected') abortRef.current?.abort(); };
+        const unsubscribe = deviceSession.subscribe(stop);
+        return () => { unsubscribe(); abortRef.current?.abort(); onRunningChange?.(false); };
+    }, [onRunningChange]);
     const openRef = useRef(open);
     const scrollBoxRef = useRef(null);   // 消息列表滚动容器（自己控滚动，不用 scrollIntoView）
     openRef.current = open;
@@ -192,8 +198,10 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
 
     const handleSend = async () => {
         const text = input.trim();
-        if (!text || running) return;
+        if (!text || running || disabled) return;
         if (!hasKey) { setSettingsOpen(true); return; }
+        const taskEpoch = deviceSession.epoch;
+        try { getScript(); } catch { return; }
         setInput('');
         setError(null);
         forceFollowRef.current = true;   // 用户主动发消息 → 强制恢复跟随最新
@@ -209,6 +217,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
             cfg,
             signal: abortRef.current.signal,
             onEvent: (ev) => {
+                if (deviceSession.epoch !== taskEpoch || !deviceSession.device.connected) return;
                 switch (ev.type) {
                     case 'round_start':
                         stream.reset();
@@ -261,6 +270,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                 }
             },
         });
+        if (deviceSession.epoch !== taskEpoch || !deviceSession.device.connected) return;
         // 收尾：中断或出错时把本轮未完成的流式文本丢弃，刷新历史
         stream.reset();
         setToolStatus('');
@@ -284,7 +294,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
     const applyScriptRef = useRef(applyScript);
     applyScriptRef.current = applyScript;
     const handleUndo = useCallback((ts) => {
-        if (isAgentRunning()) return;
+        if (isAgentRunning() || disabled) return;
         const entry = undoByTs(ts);
         if (entry) {
             applyScriptRef.current(entry.before);
@@ -294,7 +304,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
             setUndoMissed(true);
             setTimeout(() => setUndoMissed(false), 4000);
         }
-    }, [rerender]);
+    }, [rerender, disabled]);
 
     const handleClear = () => {
         if (!running) rerender();
@@ -350,7 +360,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                 <Box sx={{ flex: 1 }} />
                 <Tooltip title="撤销最近一次 AI 编辑">
                     <span>
-                        <IconButton size="small" onClick={() => handleUndo(undoEntry.ts)} disabled={!undoEntry || running}>
+                        <IconButton size="small" onClick={() => handleUndo(undoEntry.ts)} disabled={disabled || !undoEntry || running}>
                             <UndoIcon sx={{ fontSize: 18 }} />
                         </IconButton>
                     </span>
@@ -358,7 +368,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                 {/* 清空对话 = 成本归零最快的动作，所以给它文字按钮而不是一个不起眼的图标 */}
                 <Tooltip title="清空对话：整段历史删掉，之后每次请求都从最小上下文重新开始（最省钱的操作）">
                     <span>
-                        <Button size="small" onClick={handleClear} disabled={running}
+                        <Button size="small" onClick={handleClear} disabled={disabled || running}
                             startIcon={<DeleteSweepIcon sx={{ fontSize: 15 }} />}
                             sx={{
                                 textTransform: 'none', minWidth: 0, px: 0.75, fontSize: 12,
@@ -369,7 +379,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                     </span>
                 </Tooltip>
                 <Tooltip title="设置">
-                    <IconButton size="small" onClick={() => setSettingsOpen(true)}>
+                    <IconButton size="small" disabled={disabled || running} onClick={() => setSettingsOpen(true)}>
                         <SettingsIcon sx={{ fontSize: 18 }} />
                     </IconButton>
                 </Tooltip>
@@ -425,7 +435,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                     {/* 上下文接近上限：此刻"清空对话"是最省钱的建议，明说出来 */}
                     {nearLimit && (
                         <Notice tone="warn" sx={{ mx: 1, mt: 0.5 }} action={
-                            <Button size="small" onClick={handleClear} disabled={running}
+                            <Button size="small" onClick={handleClear} disabled={disabled || running}
                                 sx={{ textTransform: 'none', color: 'var(--panel-danger)', minWidth: 0 }}>清空</Button>
                         }>
                             {requestLimited
@@ -449,7 +459,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                         )}
                         {/* rev 让 memo 能识别"历史真的变了"：session.messages 是原地 push 的，
                             只比引用会让消息列表永远不更新 */}
-                        <AiMessageList messages={messages} rev={messages.length} onUndo={running ? undefined : handleUndo} />
+                        <AiMessageList messages={messages} rev={messages.length} onUndo={running || disabled ? undefined : handleUndo} />
                         {/* 思考中动画 + 阶段状态（流式文本直接跟在下方） */}
                         {running && (
                             <Box sx={{ mx: 1, mb: 1 }}>
@@ -482,7 +492,7 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                         <Notice tone="warn" className="selectable" sx={{ mx: 1, my: 0.5 }} action={
                             <Box sx={{ display: 'flex', gap: 0.5, flexShrink: 0 }}>
                                 {error.isAuth && (
-                                    <Button size="small" onClick={() => setSettingsOpen(true)}
+                                    <Button size="small" disabled={disabled || running} onClick={() => setSettingsOpen(true)}
                                         sx={{ textTransform: 'none', color: 'var(--panel-danger)', minWidth: 0 }}>设置</Button>
                                 )}
                                 <Button size="small" onClick={() => setError(null)}
@@ -506,14 +516,14 @@ export default function AiChatPanel({ open, getScript, applyScript, onRunningCha
                                     handleSend();
                                 }
                             }}
-                            disabled={false}
+                            disabled={disabled && !running}
                         />
                         {running ? (
                             <IconButton color="error" onClick={handleStop} title="停止">
                                 <StopIcon />
                             </IconButton>
                         ) : (
-                            <IconButton color="primary" onClick={handleSend} disabled={!input.trim()} title="发送（Enter 发送，Shift+Enter 换行）">
+                            <IconButton color="primary" onClick={handleSend} disabled={disabled || !input.trim()} title="发送（Enter 发送，Shift+Enter 换行）">
                                 <SendIcon />
                             </IconButton>
                         )}

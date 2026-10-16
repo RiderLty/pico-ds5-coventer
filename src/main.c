@@ -29,6 +29,12 @@
 #include "lua_binder.h"
 #include "lua_script.h"
 
+// Two-core startup handshake. Keep IRQs enabled while waiting so KV Flash
+// operations can still lock out the other core. No FIFO traffic or new locks:
+// pico_multicore owns the FIFO for Flash lockout after core1 is launched.
+enum { STARTUP_WAIT_SCRIPT, STARTUP_SCRIPT_READY, STARTUP_DEVICE_READY };
+static uint32_t s_startup_phase;
+
 // ARM 工具链 15.x 兼容: newlib 的 remove()/rename()（Lua os 库拉入）通过
 // _unlink_r/_link_r 调用 _unlink/_link, 但 Pico SDK 的 newlib_interface.c
 // 未提供这两个 syscall 桩。裸机无文件系统环境直接返回错误。
@@ -68,11 +74,16 @@ void core1_main(void) {
   input_app_init();
 
   // 初始化 Lua VM + 加载 KV 脚本，缺失或加载失败时回退预制脚本（全部在
-  // core1 同线程 —— 与 mapper 的 engine 线程模型一致）。失败不致命：
-  // C 默认映射照常，仅无 Lua 事件。
+  // core1 同线程 —— 与 mapper 的 engine 线程模型一致）。先完成全部顶层
+  // dev_enable 请求，再允许 core0 以最终能力进行第一次 USB 枚举。
   lua_script_boot();
+  __atomic_store_n(&s_startup_phase, STARTUP_SCRIPT_READY, __ATOMIC_RELEASE);
+  while (__atomic_load_n(&s_startup_phase, __ATOMIC_ACQUIRE) != STARTUP_DEVICE_READY) {
+    tight_loop_contents();
+  }
 
-  // 在 core1 上初始化 PIO-USB Host 栈 (roothub port1)
+  // Device 就绪后才启动 Host / Lua tick，避免输入回调在首枚举配置提交前
+  // 改写启动脚本的目标。之后的 dev_enable 仍按运行期热重载处理。
   tusb_rhport_init_t host_init = {
     .role  = TUSB_ROLE_HOST,
     .speed = TUSB_SPEED_FULL
@@ -125,7 +136,12 @@ int main(void) {
   static uint32_t s_core1_stack[4096] __attribute__((aligned(8)));   // 16KB
   multicore_launch_core1_with_stack(core1_main, s_core1_stack, sizeof(s_core1_stack));
 
-  sleep_ms(100);
+  while (__atomic_load_n(&s_startup_phase, __ATOMIC_ACQUIRE) != STARTUP_SCRIPT_READY) {
+    tight_loop_contents();
+  }
+  // Device 栈还未初始化，不会连接主机；此处直接应用最终目标，无断开/500ms 等待。
+  usb_km_task();
+  ds5_pad_init();
   // 在原生 USB 上初始化 Device 栈 (roothub port0)
   tusb_rhport_init_t dev_init = {
     .role  = TUSB_ROLE_DEVICE,
@@ -133,7 +149,7 @@ int main(void) {
   };
 
   tusb_init(0, &dev_init);
-  ds5_pad_init();
+  __atomic_store_n(&s_startup_phase, STARTUP_DEVICE_READY, __ATOMIC_RELEASE);
 
   DEBUG("[DS5C] core0 device ready (PIO-USB @ GPIO12/13, tusb_debug=%d)\n",
                CFG_TUSB_DEBUG);

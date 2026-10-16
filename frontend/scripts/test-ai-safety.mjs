@@ -5,7 +5,7 @@ globalThis.localStorage = { getItem: (k) => store.get(k), setItem: (k, v) => sto
 const { executeTool, undoByTs, undoCount } = await import('../src/utils/aiTools.js');
 const { deviceSession } = await import('../src/utils/deviceSession.js');
 const { chatCompletionStream } = await import('../src/utils/aiClient.js');
-const { normalizeAiCfg, loadAiCfg, initAiCfg } = await import('../src/utils/aiSettings.js');
+const { normalizeAiCfg, loadAiCfg } = await import('../src/utils/aiSettings.js');
 const { pushLog, clearLogs } = await import('../src/utils/logStore.js');
 let passed = 0;
 const failures = [];
@@ -94,11 +94,7 @@ async function read(c) { return executeTool(call('read_current_script'), c); }
     ok(!preserved.requestBudgetAuto && preserved.requestBudgetTokens === 256000, '旧的自定义单轮上限继续保留');
     const manual = normalizeAiCfg({ contextBudgetTokens: 1000000, requestBudgetTokens: 128000, requestBudgetAuto: false });
     ok(!manual.requestBudgetAuto && manual.requestBudgetTokens === 128000, '明确关闭跟随后保留手动单轮上限');
-    store.set('pico_ai_cfg_v1', JSON.stringify({ apiKey: 'legacy' }));
-    globalThis.fetch = async (url, init) => init.method === 'GET'
-        ? new Response('{}', { status: 200 }) : new Response('', { status: 500 });
-    await initAiCfg();
-    ok(store.has('pico_ai_cfg_v1'), '迁移写入失败保留旧配置');
+
 }
 // Lua 长字符串中的行尾空白具有语义，不能靠文本归一化猜测匹配
 {

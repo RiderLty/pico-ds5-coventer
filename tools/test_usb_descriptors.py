@@ -28,6 +28,12 @@ unsigned test_mask;
 unsigned test_setup_stage = CONTROL_STAGE_SETUP;
 unsigned test_length;
 uint8_t test_data[512];
+void pico_get_unique_board_id_string(char *out, unsigned len) {
+    const char serial[] = "0123456789ABCDEF";
+    if (len > sizeof serial) len = sizeof serial;
+    memcpy(out, serial, len);
+    out[len - 1] = 0;
+}
 bool usb_km_kbd_enabled(void) { return (test_mask & 1) != 0; }
 bool usb_km_mouse_enabled(void) { return (test_mask & 2) != 0; }
 bool usb_km_io_enabled(void) { return (test_mask & 4) != 0; }
@@ -88,6 +94,13 @@ def check(lib):
         assert revision != 0x0101
         assert all(((revision >> shift) & 15) <= 9 for shift in (0, 4, 8, 12))
         assert revision == revisions.setdefault(current, revision)
+        assert device[16] == (6 if io else 0)
+        serial = lib.tud_descriptor_string_cb(6, 0)
+        if io:
+            assert serial
+            assert C.string_at(serial, 34) == b'\x22\x03' + '0123456789ABCDEF'.encode('utf-16le')
+        else:
+            assert not serial
 
         signature = C.string_at(lib.tud_descriptor_string_cb(0xEE, 0), 18)
         assert signature == b"\x12\x03" + "MSFT100".encode("utf-16le") + b"\x21\0"
@@ -140,7 +153,7 @@ def check(lib):
         assert query(4, code=0x22) is None
         assert query(6) is None
     assert len(set(revisions.values())) == 8
-    print("PASS: boot, 8 layouts, repeated transitions, OS signature, Compatible ID, GUID properties, request validation")
+    print("PASS: boot, 8 layouts, repeated transitions, stable WinUSB serial/baseline identity, OS signature, Compatible ID, GUID properties, request validation")
 
 
 def main():
@@ -148,6 +161,8 @@ def main():
         tmp = Path(tmp)
         config = tmp / "host_config.h"
         config.write_text(CONFIG)
+        (tmp / "pico").mkdir()
+        (tmp / "pico/unique_id.h").write_text('#define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8\nvoid pico_get_unique_board_id_string(char *out, unsigned len);\n')
         stubs = tmp / "stubs.c"
         stubs.write_text(STUBS)
         library = tmp / "descriptors.so"
@@ -155,6 +170,7 @@ def main():
             os.environ.get("CC", "cc"), "-std=c11", "-shared", "-fPIC",
             "-Wall", "-Wextra", "-Werror",
             f'-DCFG_TUSB_CONFIG_FILE="{config}"',
+            "-I", str(tmp),
             "-I", str(ROOT / "lib/pico-sdk/lib/tinyusb/src"),
             "-I", str(ROOT / "src"),
             str(ROOT / "src/usb_descriptors.c"), str(stubs),

@@ -3,7 +3,44 @@
 #include "../src/lua_script.c"
 #include "lua_core.h"
 #include "blockdevice/flash.h"
+#include "kbd_out.h"
+#include "mouse_queue.h"
+#include "usb_io.h"
 #include <lua.h>
+#include <lauxlib.h>
+
+// Real usb_km.c applies requests; mock only its hardware/output dependencies.
+static bool device_inited, keyboard_enabled;
+static unsigned applied, applies, disconnects, connects, slept;
+static uint8_t keyboard_instance, io_instance;
+void debug_log(const char *fmt, ...) { (void)fmt; }
+void kbd_out_init(void) { keyboard_enabled=false; keyboard_instance=KBD_HID_INST_NONE; }
+void mouse_queue_init(void) {}
+void usb_io_init(void) { io_instance=USB_IO_INST_NONE; }
+bool tud_inited(void) { return device_inited; }
+bool tud_mounted(void) { return device_inited; }
+bool tud_disconnect(void) { ++disconnects; return true; }
+bool tud_connect(void) { ++connects; return true; }
+void sleep_ms(uint32_t ms) { slept+=ms; }
+void usb_km_apply(bool mouse, bool kbd, bool io) {
+    applied=(kbd ? USB_KM_BIT_KBD : 0) | (mouse ? USB_KM_BIT_MOUSE : 0) | (io ? USB_KM_BIT_IO : 0);
+    ++applies;
+}
+void kbd_hid_set_instance(uint8_t instance) { keyboard_instance=instance; }
+void usb_io_set_instance(uint8_t instance) { io_instance=instance; }
+void kbd_out_set_enabled(bool on) { keyboard_enabled=on; }
+void mouse_queue_clear(void) {}
+bool kbd_hid_enabled(void) { return keyboard_enabled; }
+bool kbd_out_peek(kbd_out_state_t *out) { (void)out; return false; }
+bool kbd_hid_send_nkro(uint8_t modifier, const uint8_t bitmap[KBD_HID_NKRO_BYTES]) {
+    (void)modifier; (void)bitmap; return false;
+}
+void kbd_out_commit(void) {}
+bool mouse_queue_pop(mouse_report_t *out) { (void)out; return false; }
+bool mouse_hid_send(const mouse_report_t *rep) { (void)rep; return false; }
+void mouse_queue_push(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons) {
+    (void)dx; (void)dy; (void)wheel; (void)buttons;
+}
 
 static uint8_t flash[LUA_KV_SIZE];
 static unsigned erases, programs, releases;
@@ -14,9 +51,13 @@ uint64_t time_us_64(void) { return now += 1000; }
 void lua_core_debug_cb(const char *s) { (void)s; }
 void input_app_release_outputs(void) { ++releases; }
 static int noop(lua_State *L) { (void)L; return 0; }
+static int enable(lua_State *L) {
+    usb_km_request((int)luaL_optinteger(L,1,-1), (int)luaL_optinteger(L,2,-1), (int)luaL_optinteger(L,3,-1));
+    return 0;
+}
 void lua_binder_rebind(void) {
     lua_core_register("print", noop);
-    lua_core_register("dev_enable", noop);
+    lua_core_register("dev_enable", enable);
     lua_core_register_in("hidkit", "info", noop);
 }
 static int bd_init(blockdevice_t *bd) { bd->is_initialized=true; return 0; }
@@ -68,8 +109,8 @@ static uint8_t request(const uint8_t *p, unsigned n) {
 }
 static uint8_t op(uint8_t code) { return request(&code,1); }
 static void put32(uint8_t *p,uint32_t n) { for(unsigned i=0;i<4;++i) p[i]=n>>(i*8); }
-static void upload(const char *source,unsigned n) {
-    uint8_t body[512]={1}; put32(body+1,n); put32(body+5,checksum(source,n));
+static void upload_kind(const char *source,unsigned n,uint8_t kind) {
+    uint8_t body[512]={0}; body[0]=kind; put32(body+1,n); put32(body+5,checksum(source,n));
     assert(!request(body,9));
     for(unsigned off=0;off<n;) {
         unsigned count=n-off; if(count>507) count=507;
@@ -77,9 +118,11 @@ static void upload(const char *source,unsigned n) {
         assert(!request(body,count+5));off+=count;
     }
 }
+static void upload(const char *s,unsigned n) { upload_kind(s,n,1); }
 static void run(const char *s) { upload(s,strlen(s)); assert(!op(3)); }
 
 int main(void) {
+    usb_km_init();
     memset(flash,255,sizeof flash);
     fail_program_after=0;
     assert(!lua_store_init() && flash_devices==0);
@@ -101,6 +144,21 @@ int main(void) {
     assert(lua_core_dostring("assert(boots==2 and boot==false)"));
     assert(programs==initial_programs && erases==initial_erases);
     assert(!op(4) && s_saved && !s_dirty);
+    // AI uses its own bounded KV record and must never execute/swap the Lua VM.
+    assert(!op(11) && strstr((char *)reply, "\"size\":0"));
+    const char ai[]="{\"apiKey\":\"secret\",\"model\":\"test\"}";
+    upload_kind(ai,strlen(ai),13);
+    assert(op(3)==PROTO_ERR_COMMAND);
+    s_crc^=1; assert(op(14)==PROTO_ERR_CRC); s_crc^=1;
+    assert(!op(14));
+    assert(s_size==strlen(good) && !memcmp(s_image,good,s_size) && !s_dirty);
+    lua_store_deinit(); assert(lua_store_init());
+    assert(!op(11));
+    uint8_t ai_read[7]={12}; ai_read[5]=strlen(ai);
+    assert(!request(ai_read,sizeof ai_read) && reply_size==strlen(ai) && !memcmp(reply,ai,reply_size));
+    uint8_t ai_begin[9]={13}; put32(ai_begin+1,AI_CFG_MAX+1);
+    assert(request(ai_begin,sizeof ai_begin)==PROTO_ERR_LENGTH);
+    upload("a=1",3); assert(op(14)==PROTO_ERR_COMMAND); assert(!op(8));
     unsigned small_erases=erases;
     for (unsigned i=0;i<5;++i) assert(!op(4));
     assert(erases==small_erases); // small records append within the erased sector
@@ -167,6 +225,7 @@ int main(void) {
         assert((size==10 && !memcmp(saved,"marker=456",10)) || size==LUA_SCRIPT_MAX);
     }
     assert(!op(7) && !s_saved);
+    assert(!request(ai_read,sizeof ai_read) && reply_size==strlen(ai) && !memcmp(reply,ai,reply_size));
     assert(op(9)==PROTO_ERR_SCRIPT && s_image==s_default_image);
     // Persist a syntactically bad script directly to simulate a bad boot KV value.
     assert(!lua_store_save("function invalid(",17));
@@ -174,9 +233,43 @@ int main(void) {
     assert(flash_devices==0);
     lua_script_boot();assert(s_image==s_default_image && lua_binder_is_ready());
     assert(s_saved && s_dirty && strstr(s_error,"script"));
+    // Boot applies the final top-level target before Device initialization.
+    const char startup[]="dev_enable(1,0,0); dev_enable(-1,1,1); dev_enable(0,-1,-1)";
+    assert(!lua_store_save(startup,strlen(startup)));
+    usb_km_init(); lua_script_boot();
+    assert(!usb_km_mouse_enabled() && !usb_km_io_enabled()); // still pending
+    usb_km_task();
+    assert(applied==(USB_KM_BIT_MOUSE|USB_KM_BIT_IO) && applies==1);
+    assert(keyboard_instance==KBD_HID_INST_NONE && io_instance==2);
+    assert(!disconnects && !connects && !slept);
+    device_inited=true; // first enumeration uses this already-applied configuration
+    assert(lua_core_dostring("dev_enable(0,1,1)")); usb_km_task();
+    assert(applies==1 && !disconnects); // same state, no reload
+    assert(lua_core_dostring("dev_enable(1,-1,-1)")); usb_km_task();
+    assert(applied==7 && applies==2 && keyboard_instance==2 && io_instance==3);
+    assert(disconnects==1 && connects==1 && slept==500);
+    // Defining tick at boot must not execute it until the Device is ready.
+    const char delayed[]="function tick(dt) dev_enable(1,0,1) end";
+    assert(!lua_store_save(delayed,strlen(delayed)));
+    device_inited=false; usb_km_init(); lua_script_boot();
+    unsigned old_applies=applies; usb_km_task();
+    assert(applies==old_applies && !usb_km_kbd_enabled() && !usb_km_io_enabled());
+    device_inited=true; lua_binder_process(); usb_km_task();
+    assert(applied==(USB_KM_BIT_KBD|USB_KM_BIT_IO) && keyboard_instance==1 && io_instance==2);
+    assert(disconnects==2 && connects==2 && slept==1000);
+    // A failed boot must discard partial requests before the default is run.
+    const char *failed_boot[]={"dev_enable(1,1,1); error('bad boot')", "dev_enable(1,1,1); while true do end"};
+    for(unsigned i=0;i<2;++i) {
+        assert(!lua_store_save(failed_boot[i],strlen(failed_boot[i])));
+        device_inited=false; usb_km_init(); lua_script_boot();
+        assert(s_image==s_default_image && s_dirty && s_error[0]);
+        old_applies=applies; usb_km_task();
+        assert(applies==old_applies && !usb_km_kbd_enabled() && !usb_km_mouse_enabled() && !usb_km_io_enabled());
+        assert(disconnects==2 && connects==2 && slept==1000);
+    }
     assert(releases>10);
     lua_binder_deinit();discard_upload();free(s_owned);
     lua_store_deinit();
     assert(flash_devices==0);
-    puts("PASS: real Lua/KV RAM-only run, explicit save/reload/delete, boot/default fallback, watchdog, 60KiB, GC, interrupted writes, CRC, sessions");
+    puts("PASS: real Lua/KV RAM-only run, explicit save/reload/delete, boot/default fallback, watchdog, 60KiB, GC, interrupted writes, CRC, sessions, first-enumeration capabilities and runtime reload");
 }

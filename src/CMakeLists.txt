@@ -85,6 +85,7 @@ target_link_libraries(${target_name} PRIVATE
  tinyusb_device
  tinyusb_host
  pico_time
+ pico_unique_id
  hardware_uart
  hardware_gpio
  hidkit

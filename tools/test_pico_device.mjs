@@ -334,6 +334,7 @@ function fakeUsb() {
 {
   const usb = fakeUsb(), device = new PicoDevice();
   await device.connect("winusb", { device: usb });
+  assert.equal(device.usbDevice, usb);
   assert.equal(usb.selected, true);
   assert.equal(await device.info(), "test board");
   await device.test(513);
@@ -341,6 +342,7 @@ function fakeUsb() {
   await assert.rejects(device.info(), { code: "TRANSFER" });
   await device.disconnect();
   assert.equal(usb.closed, 1);
+  assert.equal(device.usbDevice, null);
 }
 {
   const usb = fakeUsb(), device = new PicoDevice();
@@ -354,6 +356,7 @@ class ScriptBoard extends Board {
   constructor() {
     super();
     this.source = text.encode("-- embedded default");
+    this.ai = new Uint8Array();
     this.persisted = null;
     this.staged = null;
     this.error = "";
@@ -365,6 +368,7 @@ class ScriptBoard extends Board {
       case 0:
         reply = text.encode(JSON.stringify({size: this.source.length, crc32: P.crc32(this.source), maxSize: 61440}));
         break;
+      case 13:
       case 1:
         assert.equal(body.length, 9);
         this.staged = new Uint8Array(view.getUint32(1, true));
@@ -400,6 +404,15 @@ class ScriptBoard extends Board {
       case 8: this.staged = null; break;
       case 9: assert.ok(this.persisted); this.source = this.persisted.slice(); break;
       case 10: reply = text.encode(this.error); break;
+      case 11: reply = text.encode(JSON.stringify({size: this.ai.length, crc32: P.crc32(this.ai)})); break;
+      case 12:
+        reply = this.ai.slice(view.getUint32(1, true), view.getUint32(1, true) + view.getUint16(5, true));
+        if (this.corruptAiRead && reply.length) reply[0] ^= 1;
+        break;
+      case 14:
+        assert.equal(this.received, this.staged.length);
+        assert.equal(P.crc32(this.staged), this.expectedCrc);
+        this.ai = this.staged; this.staged = null; break;
       default: assert.fail("Unexpected script operation");
     }
     this.reply(CMD.SCRIPT, m.id, reply);
@@ -410,6 +423,15 @@ for (const transport of ["winusb", "serial"]) {
   const device = new PicoDevice({transportFactory: () => board});
   await device.connect(transport);
   const initial = await device.scriptRead();
+  assert.equal(await device.aiCfgGet(), null);
+  const cfg = { apiKey: '秘密'.repeat(300), model: 'test', maxRounds: 12 };
+  await device.aiCfgSet(cfg);
+  assert.deepEqual(await device.aiCfgGet(), cfg);
+  assert.equal(await device.scriptRead(), initial);
+  await assert.rejects(device.aiCfgSet({ apiKey: '中'.repeat(1400) }), RangeError);
+  board.corruptAiRead = true;
+  await assert.rejects(device.aiCfgGet(), { code: 'SCRIPT' });
+  board.corruptAiRead = false;
   for (const source of ["-- 你好\nmarker=1", "marker=2".padEnd(61440, " ")]) {
     // SAVE cannot interleave the BEGIN/WRITE/RUN sequence.
     const [status] = await Promise.all([device.scriptRun(source), device.scriptSave()]);
@@ -423,6 +445,7 @@ for (const transport of ["winusb", "serial"]) {
   assert.equal((await device.scriptRead()).length, 61440);
   await device.scriptDelete();
   assert.equal(board.persisted, null);
+  assert.deepEqual(await device.aiCfgGet(), cfg);
   const commands = board.commands.length;
   await assert.rejects(device.scriptRun(""), RangeError);
   await assert.rejects(device.scriptRun("中".repeat(20481)), RangeError);

@@ -1,5 +1,11 @@
 # PicoDevice 网页通信 API
 
+`PicoDevice.isWinUsbDevice(usbDevice)` 仅检查描述符，筛选本项目 VID/PID 且具有厂商类
+bulk IN/OUT 的设备，不打开设备。连接后 `device.usbDevice` 返回底层 USBDevice（串口或
+断开时为 null）。通过 `connect('winusb', { device: usbDevice })` 可连接已授权设备，
+不弹选择框；未传设备时默认选择器按 VID/PID 和厂商类筛选。工作台另有自动发现、重连、
+退避和手动暂停控制，详见 [WinUSB 重连](../frontend/README.md#winusb-自动重连)。
+
 `tools/pico-device.js` 封装 WinUSB（WebUSB）和串口（Web Serial），不依赖第三方库。
 测试页 `tools/webhid-test.html` 直接使用这套 API。Chrome/Edge 顶层安全页面可用：
 localhost、HTTPS，或通过普通 `<script>` 从 file:// 打开；ES module 请通过 HTTP(S) 加载。
@@ -110,6 +116,8 @@ console.log(result.uploadCrc, result.downloadCrc, result.body);
 | `scriptReload(options)` | 从 KV 重新加载运行；加载失败恢复预制脚本 |
 | `scriptDefault(options)` | 在 RAM 运行预制脚本，不修改 KV |
 | `scriptDelete(options)` | 删除 KV 脚本，不切换当前运行内容 |
+| `aiCfgGet(options)` | 读取设备 KV 的 AI JSON；从未保存返回 null；分块并校验 CRC |
+| `aiCfgSet(config, options)` | JSON UTF-8 限制 1..4096B，上传并保存到 `ai_cfg`；成功返回 true，不修改 Lua |
 | `scriptError(options)` | 最近操作错误 string；错误详情也在 PicoDeviceError.detail 中 |
 
 ```js

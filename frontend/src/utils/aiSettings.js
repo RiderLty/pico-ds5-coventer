@@ -1,4 +1,5 @@
-// AI preferences are browser-local; they never write to the device KV.
+// Device KV is authoritative. Browser storage is only a legacy migration source.
+import { deviceSession } from './deviceSession';
 import { contextCapacity, DEFAULT_REQUEST_BUDGET_TOKENS } from './aiContext';
 const STORAGE_KEY = 'ds5_ai_cfg_v1';
 
@@ -15,9 +16,6 @@ const DEFAULT_CFG = {
     maxTokens: 0,
 };
 
-let cache = null;
-let inited = false;
-
 export function normalizeAiCfg(cfg) {
     const merged = { ...DEFAULT_CFG, ...(cfg || {}) };
     merged.contextBudgetTokens = contextCapacity(merged.contextBudgetTokens);
@@ -33,26 +31,44 @@ export function normalizeAiCfg(cfg) {
             ? n : DEFAULT_CFG[key];
     }
     if (merged.requestBudgetAuto) merged.requestBudgetTokens = merged.contextBudgetTokens;
+    for (const key of ['baseUrl', 'model', 'apiKey']) {
+        if (typeof merged[key] !== 'string') merged[key] = DEFAULT_CFG[key];
+    }
     merged.baseUrl = (merged.baseUrl || DEFAULT_CFG.baseUrl).replace(/\/+$/, '');
     return merged;
 }
 
 export function loadAiCfg() {
-    if (!inited) {
-        inited = true;
-        try { cache = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch { /* private mode */ }
-    }
-    return normalizeAiCfg(cache);
+    return normalizeAiCfg(deviceSession.getSnapshot().aiCfg);
 }
 
 export async function saveAiCfg(cfg) {
-    cache = normalizeAiCfg(cfg);
-    inited = true;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cache)); return true; }
-    catch { return false; }
+    if (!deviceSession.getSnapshot().aiReady) throw new Error('请先读取设备 AI 配置');
+    const epoch = deviceSession.epoch;
+    await deviceSession.saveAiCfg(normalizeAiCfg(cfg));
+    deviceSession.assertSession(epoch);
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
+    return true;
 }
 
-export async function initAiCfg() { loadAiCfg(); }
+export async function initAiCfg() {
+    const epoch = deviceSession.epoch;
+    const cfg = await deviceSession.readAiCfg();
+    deviceSession.assertSession(epoch);
+    if (cfg !== null) {
+        deviceSession.update({ aiReady: true });
+        return;
+    }
+    let legacy;
+    try { legacy = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch { /* unavailable */ }
+    if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
+        await deviceSession.saveAiCfg(normalizeAiCfg(legacy));
+        deviceSession.assertSession(epoch);
+        try { localStorage.removeItem(STORAGE_KEY); } catch { /* retry migration is harmless */ }
+    }
+    deviceSession.assertSession(epoch);
+    deviceSession.update({ aiReady: true });
+}
 
 // 拼请求 URL：兼容 baseUrl 带/不带 /v1、带/不带 /chat/completions 的写法
 export function buildChatUrl(baseUrl) {
@@ -62,11 +78,14 @@ export function buildChatUrl(baseUrl) {
 }
 
 // 测试连接：发一个 max_tokens=1 的最小请求，返回 {ok, status, message, latencyMs}
-export async function testAiConnection(cfg) {
+export async function testAiConnection(cfg, { signal } = {}) {
+    deviceSession.assertSession(deviceSession.epoch);
+    if (!deviceSession.getSnapshot().aiReady) throw new Error('请先读取设备 AI 配置');
     const t0 = Date.now();
     try {
         const r = await fetch(buildChatUrl(cfg.baseUrl), {
             method: 'POST',
+            signal,
             headers: {
                 'Content-Type': 'application/json',
                 Authorization: `Bearer ${cfg.apiKey}`,

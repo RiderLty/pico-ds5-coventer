@@ -6,6 +6,7 @@
 
 // ── 协议常量（与 src/proto.h 一致）──────────────────────────────────
 const VID = 0x054c;
+const PID = 0x0ce6;
 const CHUNK_MAX = 62;                     // [flags][data≤61]，与 PROTO_CHUNK_DATA_MAX 一致
 const F_START = 0x01, F_END = 0x02, F_RESET = 0x04;
 const CMD = { INFO: 0x01, PRINT: 0x02, RESET: 0x03, TEST: 0x04, SCRIPT: 0x20, ERROR: 0x7F };
@@ -122,6 +123,17 @@ function encodeFrame(seq, chunk) {
   return Uint8Array.from(frame);
 }
 
+function winUsbInterface(configuration, interfaceNumber) {
+  for (const itf of configuration?.interfaces ?? []) {
+    if (interfaceNumber !== undefined && itf.interfaceNumber !== interfaceNumber) continue;
+    const alternate = itf.alternates.find((a) => a.interfaceClass === 255 &&
+      a.endpoints.some((e) => e.type === "bulk" && e.direction === "in") &&
+      a.endpoints.some((e) => e.type === "bulk" && e.direction === "out"));
+    if (alternate) return { itf, alternate };
+  }
+  return null;
+}
+
 class WinUsbTransport {
   constructor(onchunk, onclose, onerror) {
     Object.assign(this, { onchunk, onclose, onerror, seq: 0, closing: false, name: "winusb" });
@@ -133,20 +145,14 @@ class WinUsbTransport {
   async open(options = {}) {
     if (!globalThis.navigator?.usb) throw new PicoError("当前浏览器不支持 WebUSB", "UNSUPPORTED");
     this.device = options.device ?? await navigator.usb.requestDevice({
-      filters: options.filters ?? [{ vendorId: VID }],
+      filters: options.filters ?? [{ vendorId: VID, productId: PID, classCode: 255 }],
     });
     await this.device.open();
     this.opened = true;
     if (!this.device.configuration) await this.device.selectConfiguration(options.configurationValue ?? 1);
-    let alternate;
-    const itf = this.device.configuration.interfaces.find((i) => {
-      if (options.interfaceNumber !== undefined && i.interfaceNumber !== options.interfaceNumber) return false;
-      alternate = i.alternates.find((a) => a.interfaceClass === 255 &&
-        a.endpoints.some((e) => e.type === "bulk" && e.direction === "in") &&
-        a.endpoints.some((e) => e.type === "bulk" && e.direction === "out"));
-      return !!alternate;
-    });
-    if (!itf) throw new PicoError("未找到带 bulk IN/OUT 的 WinUSB 接口", "INTERFACE");
+    const match = winUsbInterface(this.device.configuration, options.interfaceNumber);
+    if (!match) throw new PicoError("未找到带 bulk IN/OUT 的 WinUSB 接口", "INTERFACE");
+    const { itf, alternate } = match;
     this.interfaceNumber = itf.interfaceNumber;
     await this.device.claimInterface(this.interfaceNumber);
     if (itf.alternate?.alternateSetting !== alternate.alternateSetting) {
@@ -476,6 +482,12 @@ class PicoDevice {
   get state() { return this._state; }
   get connected() { return this.state === "connected"; }
   get transportType() { return this._session?.kind ?? null; }
+  get usbDevice() { return this._session?.kind === "winusb" ? this._session.transport?.device ?? null : null; }
+  // Inspect descriptors without opening/claiming HID or prompting for permission.
+  static isWinUsbDevice(device) {
+    return device?.vendorId === VID && device.productId === PID &&
+      (device.configurations ?? []).some(configuration => !!winUsbInterface(configuration));
+  }
   static get supported() {
     return { winusb: !!globalThis.navigator?.usb, serial: !!globalThis.navigator?.serial };
   }
@@ -686,6 +698,49 @@ class PicoDevice {
       }
       if (crc32(bytes) !== status.crc32) throw new PicoError("读取期间脚本发生变化，请重试", "SCRIPT");
       return dec.decode(bytes);
+    });
+  }
+  /** Read AI JSON stored in the device KV, independent of the Lua image. */
+  aiCfgGet(options = {}) {
+    return this._scriptTransaction(async (call) => {
+      const status = JSON.parse(dec.decode(await call(Uint8Array.of(11), options)));
+      if (!Number.isInteger(status.size) || status.size < 0 || status.size > 4096) throw new PicoError("AI 配置长度无效", "SCRIPT");
+      const bytes = new Uint8Array(status.size);
+      for (let offset = 0; offset < bytes.length; offset += 512) {
+        const count = Math.min(512, bytes.length - offset);
+        const body = new Uint8Array(7); body[0] = 12;
+        const view = new DataView(body.buffer);
+        view.setUint32(1, offset, true); view.setUint16(5, count, true);
+        const part = await call(body, options);
+        if (part.length !== count) throw new PicoError("AI 配置读取长度不符", "SCRIPT");
+        bytes.set(part, offset);
+      }
+      if (crc32(bytes) !== status.crc32) throw new PicoError("读取期间 AI 配置发生变化，请重试", "SCRIPT");
+      return bytes.length ? JSON.parse(dec.decode(bytes)) : null;
+    });
+  }
+  /** Persist AI JSON to ai_cfg; never execute it as Lua. */
+  aiCfgSet(config, options = {}) {
+    const bytes = new TextEncoder().encode(JSON.stringify(config));
+    if (!bytes.length || bytes.length > 4096) return Promise.reject(new RangeError("AI 配置必须为 1..4096 字节（UTF-8）"));
+    return this._scriptTransaction(async (call) => {
+      const begin = new Uint8Array(9); begin[0] = 13;
+      const view = new DataView(begin.buffer);
+      view.setUint32(1, bytes.length, true); view.setUint32(5, crc32(bytes), true);
+      await call(begin, options);
+      try {
+        for (let offset = 0; offset < bytes.length; offset += 507) {
+          const part = bytes.subarray(offset, offset + 507);
+          const body = new Uint8Array(5 + part.length); body[0] = 2;
+          new DataView(body.buffer).setUint32(1, offset, true); body.set(part, 5);
+          await call(body, options);
+        }
+        await call(Uint8Array.of(14), options);
+      } catch (error) {
+        try { if (!options.signal?.aborted) await call(Uint8Array.of(8), options); } catch {}
+        throw error;
+      }
+      return true;
     });
   }
   scriptSave(options) { return this._scriptOp(4, options); }

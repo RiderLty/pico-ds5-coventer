@@ -49,3 +49,20 @@ int lua_store_delete(void) {
     int rc = kvs_delete(script_key);
     return rc == KVSTORE_ERROR_ITEM_NOT_FOUND ? KVSTORE_SUCCESS : rc;
 }
+
+int lua_store_ai_read(void *data, size_t capacity, size_t *size) {
+    if (!s_kv) return KVSTORE_ERROR_FAILED_OPERATION;
+    *size = 0;
+    kvs_info_t info;
+    int rc = s_kv->get_info(s_kv, "ai_cfg", &info);
+    if (rc == KVSTORE_ERROR_ITEM_NOT_FOUND) return KVSTORE_SUCCESS;
+    if (rc) return rc;
+    if (!info.size || info.size > capacity || info.size > AI_CFG_MAX) return KVSTORE_ERROR_INVALID_SIZE;
+    return kvs_get("ai_cfg", data, capacity, size);
+}
+
+int lua_store_ai_save(const void *data, size_t size) {
+    if (!s_kv) return KVSTORE_ERROR_FAILED_OPERATION;
+    if (!size || size > AI_CFG_MAX) return KVSTORE_ERROR_INVALID_SIZE;
+    return kvs_set("ai_cfg", data, size);
+}

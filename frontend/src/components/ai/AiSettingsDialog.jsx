@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // AI 设置对话框：API 地址 / 模型 / API Key / 温度 / 历史轮数 + 测试连接
 // ---------------------------------------------------------------------------
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button, IconButton, Box, Stack, TextField, InputAdornment, CircularProgress, Checkbox, FormControlLabel } from '@mui/material';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
@@ -14,6 +14,8 @@ import {
 const MODEL_SUGGESTIONS = ['deepseek-flash'];
 
 export default function AiSettingsDialog({ open, onClose }) {
+    const testAbort = useRef(null);
+    useEffect(() => () => testAbort.current?.abort(), []);
     const [cfg, setCfg] = useState(loadAiCfg());
     const [showKey, setShowKey] = useState(false);
     const [testing, setTesting] = useState(false);
@@ -33,21 +35,24 @@ export default function AiSettingsDialog({ open, onClose }) {
     const handleSave = async () => {
         setSaving(true);
         setSaveError('');
-        const ok = await saveAiCfg(cfg);
-        setSaving(false);
-        if (ok) {
+        try {
+            await saveAiCfg(cfg);
             onClose();
-        } else {
-            setSaveError('保存到浏览器失败，配置只在当前页面生效，请检查浏览器存储权限');
-        }
+        } catch (error) {
+            setSaveError(`保存到设备 KV 失败：${error.detail || error.message}`);
+        } finally { setSaving(false); }
     };
 
     const handleTest = async () => {
         setTesting(true);
         setTestResult(null);
-        const r = await testAiConnection(cfg);
-        setTestResult(r);
-        setTesting(false);
+        testAbort.current?.abort();
+        testAbort.current = new AbortController();
+        try {
+            const r = await testAiConnection(cfg, { signal: testAbort.current.signal });
+            if (!testAbort.current.signal.aborted) setTestResult(r);
+        } catch (error) { setTestResult({ ok: false, message: error.message }); }
+        finally { setTesting(false); }
     };
 
     // 标题右侧状态：保存中 / 测试中 / 测试结果
@@ -60,17 +65,17 @@ export default function AiSettingsDialog({ open, onClose }) {
             open={open}
             onClose={onClose}
             title="AI 助手设置"
-            hint="面板里的 AI 助手用这个 OpenAI 兼容端点直连（浏览器发起）。Key 仅存此浏览器，不写入设备，也不包含在导出的 Lua 文件中。"
+            hint="面板里的 AI 助手用这个 OpenAI 兼容端点直连（浏览器发起）。参数与 Key 保存在设备 KV，连接时读取；不包含在导出的 Lua 文件中。"
             status={status}
             busy={saving}
             actions={<>
                 <Button onClick={onClose} sx={dialogActionSx.secondary}>取消</Button>
                 <Box sx={{ flex: 1 }} />
                 <Button variant="outlined" onClick={handleTest}
-                    disabled={testing || !cfg.apiKey || !cfg.baseUrl} sx={{ ...dialogActionSx.outline, minWidth: 96 }}>
+                    disabled={saving || testing || !cfg.apiKey || !cfg.baseUrl} sx={{ ...dialogActionSx.outline, minWidth: 96 }}>
                     {testing ? <CircularProgress size={14} /> : '测试连接'}
                 </Button>
-                <Button variant="contained" disableElevation onClick={handleSave} disabled={saving}
+                <Button variant="contained" disableElevation onClick={handleSave} disabled={saving || testing}
                     sx={dialogActionSx.primary}>
                     {saving ? <CircularProgress size={14} /> : '保存'}
                 </Button>

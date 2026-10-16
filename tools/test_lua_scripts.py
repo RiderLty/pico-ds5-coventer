@@ -13,6 +13,8 @@ def main():
         tmp = Path(directory)
         mocks = {
             "pico.h": "#define PICO_FLASH_SIZE_BYTES (4u*1024u*1024u)\n",
+            "pico/stdlib.h": "#include <stdint.h>\nvoid sleep_ms(uint32_t ms);\n",
+            "tusb.h": "#include <stdbool.h>\nbool tud_inited(void);\nbool tud_mounted(void);\nbool tud_disconnect(void);\nbool tud_connect(void);\n",
             "pico/time.h": "#include <stdint.h>\nuint64_t time_us_64(void);\n",
             "pico/critical_section.h": """
                 typedef int critical_section_t;
@@ -31,7 +33,7 @@ def main():
         kv = ROOT / "lib/kvstore"
         sources = [str(path) for path in lua.glob("*.c") if path.name not in ("lua.c", "luac.c")]
         sources += [str(kv / "src" / name) for name in ("kvstore.c", "kvstore_logkvs.c", "blockdevice_stage.c", "crc32_ansi.c")]
-        sources += [str(ROOT / "src" / name) for name in ("lua_store.c", "lua_core.c", "lua_binder.c")]
+        sources += [str(ROOT / "src" / name) for name in ("lua_store.c", "lua_core.c", "lua_binder.c", "usb_km.c")]
         executable = tmp / "test"
         subprocess.run([
             os.environ.get("CC", "cc"), "-std=gnu11", "-O1", "-g",

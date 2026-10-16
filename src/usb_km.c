@@ -25,11 +25,10 @@
 #include "mouse_hid.h"
 #include "mouse_queue.h"
 
-// 全部状态 BSS 静态初始化（全关 = 全零）。usb_km_apply 在 usb_km_task 的
-// 状态切换（重枚举窗口）内惰性执行：boot 时未应用 → 配置描述符回调返回
-// flash 基线（与无 km 模块时逐字节一致）；dev_enable 请求 →
-// tud_disconnect → apply → tud_connect。队列临界区在双核启动前由
-// usb_km_init 初始化。
+// 全部状态 BSS 静态初始化（全关 = 全零）。启动时 main 等待 Lua 顶层完成，
+// 在 Device 初始化前调用 usb_km_task 直接应用目标；全关时保留 flash 基线。
+// Device 初始化后变更走 tud_disconnect → apply → tud_connect。
+// 队列临界区在双核启动前由 usb_km_init 初始化。
 
 // Lua 请求（core1 写，单次原子 store 三位一起生效）
 static volatile uint32_t s_req_mask;
@@ -74,7 +73,7 @@ bool usb_km_io_enabled(void)
     return (s_applied_mask & USB_KM_BIT_IO) != 0u;
 }
 
-// core0 主循环：请求与生效状态不一致 → 重枚举切换
+// core0：首次 Device 初始化前直接应用；运行期请求与生效状态不一致则重枚举。
 void usb_km_task(void)
 {
     uint32_t req = __atomic_load_n(&s_req_mask, __ATOMIC_ACQUIRE);

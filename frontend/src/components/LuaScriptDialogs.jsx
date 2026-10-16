@@ -40,10 +40,10 @@ const safeFileStem = (name) => String(name).replace(/[\\/:*?"<>|]/g, '_').trim()
 
 // 脚本库行内的小图标按钮：单图标、描边（outline）、鼠标悬浮出标签（Tooltip）。
 // danger = 删除的确认态（红描边）；确认态下 label 换成"再点一次"提示。
-function RowIconBtn({ label, onClick, danger, children }) {
+function RowIconBtn({ label, onClick, danger, disabled, children }) {
     return (
         <Tooltip title={label} arrow placement="top">
-            <IconButton size="small" disableRipple aria-label={label} onClick={onClick}
+            <IconButton size="small" disableRipple aria-label={label} disabled={disabled} onClick={onClick}
                 sx={{
                     width: 30, height: 30, borderRadius: '6px', p: 0.5,
                     border: `1px solid ${danger ? PANEL_DANGER_LINE : PANEL_LINE}`,
@@ -122,11 +122,14 @@ export function LuaExportDialog({ open, onClose, script, onNotify }) {
 // onEdit(item)：脚本库存档 → 只放进编辑器（不加载到内存）
 // onApply(item)：脚本库存档 → 编辑器 + 加载到内存
 // onExport()：导出编辑器当前脚本（打开「导出脚本」弹窗）
-export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, active = true }) {
+export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, disabled = false, canExport = !disabled, active = true }) {
     const [saved, setSaved] = useState([]);
     const [dragOver, setDragOver] = useState(false);
     const [pendingDelete, setPendingDelete] = useState(null);  // 两步确认删除
     const fileRef = useRef(null);
+    const usable = useRef(!disabled);
+    usable.current = !disabled;
+    useEffect(() => () => { usable.current = false; }, []);
 
     const refresh = useCallback(() => setSaved(listLuaScripts()), []);
     useEffect(() => {
@@ -141,9 +144,9 @@ export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, a
 
     const readFirstFile = (files) => {
         const file = files?.[0];
-        if (!file) return;
+        if (!file || disabled) return;
         const reader = new FileReader();
-        reader.onload = () => onApplyFromFile(String(reader.result), file.name);
+        reader.onload = () => { if (usable.current) onApplyFromFile(String(reader.result), file.name); };
         reader.readAsText(file);
     };
 
@@ -161,8 +164,8 @@ export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, a
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1, minHeight: 0 }}>
             {/* 拖拽区：点击同样弹出文件选择框（固定高度，不随列表滚动） */}
             <Box
-                onClick={() => fileRef.current?.click()}
-                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                aria-disabled={disabled} onClick={() => { if (!disabled) fileRef.current?.click(); }}
+                onDragOver={(e) => { e.preventDefault(); if (!disabled) setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={(e) => { e.preventDefault(); setDragOver(false); readFirstFile(e.dataTransfer?.files); }}
                 sx={{
@@ -175,16 +178,16 @@ export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, a
             >
                 <UploadFileIcon sx={{ fontSize: 22, color: dragOver ? PANEL_ACCENT : PANEL_MUTED }} />
                 <Typography sx={{ fontSize: 12.5, color: dragOver ? PANEL_ACCENT : PANEL_MUTED, mt: 0.5 }}>
-                    {dragOver ? '松开即导入' : '点击选择或拖入 .lua 文件'}
+                    {disabled ? '连接并读取设备脚本后可导入' : dragOver ? '松开即导入' : '点击选择或拖入 .lua 文件'}
                 </Typography>
             </Box>
-            <input ref={fileRef} type="file" accept=".lua,text/plain" hidden
+            <input ref={fileRef} type="file" disabled={disabled} accept=".lua,text/plain" hidden
                 onChange={(e) => { readFirstFile(e.target.files); e.target.value = ''; }} />
 
             {onExport && (
                 <Button size="small" variant="outlined" fullWidth disableElevation
                     startIcon={<DownloadIcon sx={{ fontSize: 16 }} />}
-                    onClick={onExport} sx={{ flexShrink: 0, textTransform: 'none' }}>
+                    disabled={!canExport} onClick={onExport} sx={{ flexShrink: 0, textTransform: 'none' }}>
                     导出当前脚本
                 </Button>
             )}
@@ -211,10 +214,10 @@ export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, a
                                     </Typography>
                                 </Box>
                                 <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                                    <RowIconBtn label="编辑（仅放入编辑器）" onClick={() => onEdit(item)}>
+                                    <RowIconBtn disabled={disabled} label="编辑（仅放入编辑器）" onClick={() => onEdit(item)}>
                                         <EditIcon sx={{ fontSize: 15 }} />
                                     </RowIconBtn>
-                                    <RowIconBtn label="应用（编辑器 + 加载到内存）" onClick={() => onApply(item)}>
+                                    <RowIconBtn disabled={disabled} label="应用（编辑器 + 加载到内存）" onClick={() => onApply(item)}>
                                         <PlayArrowIcon sx={{ fontSize: 15 }} />
                                     </RowIconBtn>
                                     <RowIconBtn label="下载为文件"

@@ -23,12 +23,13 @@ USB-TTL 的 RX 接 GPIO2、TX 接 GPIO3，并共地，使用 3.3V 电平。
 
 ## 真机复测
 
-1. 刷入 `build/src/pico-ds5-coventer.uf2`，等待约 10 秒，更新
+1. 刷入 `build/src/pico-ds5-coventer.uf2`，待固件启动，更新
    `tools/webhid-test.html` 和同目录 `pico-device.js`，在 Chrome/Edge 强制刷新（Ctrl+F5）。
 2. 连接串口，波特率选 4000000；点击 INFO，保存完整结果。
 3. 依次运行 513B、32K、64K、256K、512K、1M、2M、4M、8M。
    INFO 会排队等待压测完成，超时从出队开始计算。
-4. 再查 INFO，对比前后计数增量。也可断开串口后用 WinUSB 重复压测作为对照；
+4. 再查 INFO，对比前后计数增量。也可按下再松开 BOOT 启用 WinUSB，再断开串口，
+   用 WinUSB 重复压测作为对照（自定义 Lua 若拦截 BOOT，需自行启用 IO）；
    WinUSB 查询 INFO 也能读到 UART 计数。
 
 | INFO 字段 | 增长时的含义 |

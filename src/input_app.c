@@ -316,8 +316,8 @@ static int _lcb_hidkit_info(lua_State *L) {
  *
  *   dev_enable(kbd, mouse, io)  开关 NKRO 键盘 / 16bit 鼠标 / custom IO
  *                               通讯接口。三个参数各为三态：-1 保持 / 0 关 /
- *                               1 开（省略按 -1）。默认全关；生效需 USB 重枚举
- *                               （约 0.5s，期间 DS5 从主机短暂消失）
+ *                               1 开（省略按 -1）。默认全关；启动顶层设置用于
+ *                               首次枚举；运行期配置改变需重枚举（约 0.5s）
  *   kbd_key(keycode, down)      宿主键盘按键（HID Usage ID 0x04..0x73 /
  *                               修饰键 0xE0..0xE7，NKRO 位图全键无冲）
  *   kbd_release_all()           抬起全部键（防粘键安全阀）
@@ -524,11 +524,16 @@ static int _lcb_pad_abs(lua_State *L) {
 }
 
 // pad_touch(x0, y0, x1, y1, down1, down2)：触摸板 2 触点入队
+static uint16_t touch_coord(lua_State *L, int arg) {
+    lua_Integer v = luaL_checkinteger(L, arg);
+    return v < 0 ? 0 : v > 4095 ? 4095 : (uint16_t)v;
+}
+
 static int _lcb_pad_touch(lua_State *L) {
-    uint16_t x0    = (uint16_t)luaL_checkinteger(L, 1);
-    uint16_t y0    = (uint16_t)luaL_checkinteger(L, 2);
-    uint16_t x1    = (uint16_t)luaL_checkinteger(L, 3);
-    uint16_t y1    = (uint16_t)luaL_checkinteger(L, 4);
+    uint16_t x0    = touch_coord(L, 1);
+    uint16_t y0    = touch_coord(L, 2);
+    uint16_t x1    = touch_coord(L, 3);
+    uint16_t y1    = touch_coord(L, 4);
     bool     down1 = lua_toboolean(L, 5) != 0;
     bool     down2 = lua_toboolean(L, 6) != 0;
 

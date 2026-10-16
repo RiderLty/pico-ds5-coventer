@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { Box } from '@mui/material';
-import { EditorView, keymap, Decoration } from '@codemirror/view';
-import { Compartment, StateEffect, StateField } from '@codemirror/state';
+import { EditorView, keymap, Decoration, placeholder as editorPlaceholder } from '@codemirror/view';
+import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
 import { basicSetup } from 'codemirror';
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
@@ -88,11 +88,12 @@ const CodeEditor = React.forwardRef(function CodeEditor({ value, onChange, disab
             doc: value || '',
             extensions: [
                 basicSetup,
+                editorPlaceholder(placeholder || ''),
                 StreamLanguage.define(lua),
                 keymap.of([indentWithTab]),
                 autocompletion({ override: [luaCompletions] }),
                 aiHighlightField,
-                editableCompartment.of(EditorView.editable.of(!disabled)),
+                editableCompartment.of([EditorView.editable.of(!disabled), EditorState.readOnly.of(!!disabled)]),
                 themeCompartment.of(resolved === 'dark' ? darkEditorTheme : []),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged && !skipSync.current) {
@@ -135,7 +136,7 @@ const CodeEditor = React.forwardRef(function CodeEditor({ value, onChange, disab
     useEffect(() => {
         const view = viewRef.current;
         if (!view) return;
-        view.dispatch({ effects: editableCompartment.reconfigure(EditorView.editable.of(!disabled)) });
+        view.dispatch({ effects: editableCompartment.reconfigure([EditorView.editable.of(!disabled), EditorState.readOnly.of(!!disabled)]) });
     }, [disabled]);
 
     // 外部 value 变化 → 同步进编辑器

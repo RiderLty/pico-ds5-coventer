@@ -17,6 +17,7 @@ import { LuaScriptManager, LuaExportDialog } from './LuaScriptDialogs';
 import AiChatPanel from './ai/AiChatPanel';
 import { DialogShell, StatusPill, PANEL_LINE, PanelGroup, PanelRow, DeviceEntry } from './PanelKit';
 import { deviceSession, SCRIPT_MAX_BYTES } from '../utils/deviceSession';
+import { initAiCfg } from '../utils/aiSettings';
 import { WorkspaceModel } from '../utils/workspaceModel';
 import { clearLogs, exportLogLines, usePicoLogs } from '../utils/logStore';
 import { THEME_LABELS, useThemeMode } from '../utils/themeStore';
@@ -395,13 +396,13 @@ function ActivityButton({ active, label, Icon, onClick }) {
 }
 
 // ── 区段：脚本管理 ──────────────────────────────────────────────────────
-function ScriptsSection({ onApplyFromFile, onEdit, onApply, onExport }) {
-    return <LuaScriptManager onApplyFromFile={onApplyFromFile} onEdit={onEdit}
+function ScriptsSection({ onApplyFromFile, onEdit, onApply, onExport, disabled, canExport }) {
+    return <LuaScriptManager canExport={canExport} disabled={disabled} onApplyFromFile={onApplyFromFile} onEdit={onEdit}
         onApply={onApply} onExport={onExport} />;
 }
 
 // ── 区段：设备（连接 + 板载脚本操作 + 信息）──────────────────────────────
-function DeviceSection({ connected, transport, locked, baud, onBaud,
+function DeviceSection({ connected, transport, locked, baud, onBaud, reconnectStatus,
     onConnect, onRefresh, onDisconnect, actions, onInfo }) {
     return (
         <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0 }}>
@@ -425,6 +426,7 @@ function DeviceSection({ connected, transport, locked, baud, onBaud,
                         <TextField size="small" fullWidth label="波特率" value={baud}
                             inputProps={{ inputMode: 'numeric', 'aria-label': '波特率' }}
                             onChange={e => onBaud(e.target.value)} />
+                        {reconnectStatus && <Typography variant="caption" role="status">{reconnectStatus}</Typography>}
                     </Stack>
                 )}
             </PanelGroup>
@@ -470,7 +472,7 @@ function LeftPanel({ width, section, onSection, scripts, device }) {
 }
 
 export default function LuaWorkspace() {
-    const [model] = useState(() => new WorkspaceModel(deviceSession, defaultSource));
+    const [model] = useState(() => new WorkspaceModel(deviceSession));
     const editor = useStore(model);
     const device = useStore(deviceSession);
     const editorRef = useRef();
@@ -488,27 +490,57 @@ export default function LuaWorkspace() {
     const theme = useThemeMode();
     const connected = device.state === 'connected';
     const connecting = device.state === 'connecting';
-    const locked = !!device.busy || aiRunning || connecting;
+    const ready = connected && editor.ready;
+    const aiReady = ready && device.aiReady;
+    const epoch = deviceSession.epoch;
+    useEffect(() => () => model.dispose(), [model]);
+    useEffect(() => { setConfirm(null); setDialog(''); setError(''); setAiRunning(false); }, [epoch]);
+    useEffect(() => {
+        const warnUnsaved = event => {
+            if (model.getSnapshot().hasEdits) { event.preventDefault(); event.returnValue = ''; }
+        };
+        window.addEventListener('beforeunload', warnUnsaved);
+        return () => window.removeEventListener('beforeunload', warnUnsaved);
+    }, [model]);
+    const locked = !!device.busy || aiRunning || connecting || device.state === 'disconnecting';
     const byteLength = new TextEncoder().encode(editor.script).length;
     const tooLarge = byteLength > SCRIPT_MAX_BYTES;
     const matchesRam = device.ramSource !== null && editor.script === device.ramSource;
-    const canSave = connected && !locked && matchesRam && !tooLarge && device.status?.kvReady;
+    const canSave = ready && !locked && matchesRam && !tooLarge && device.status?.kvReady;
 
     // 操作反馈以浮动提示呈现（不占版面）；noticeSeq 变化即视为"又来了一条"，重置计时
     useEffect(() => { setToastClosed(!editor.notice); }, [editor.noticeSeq, editor.notice]);
 
     const attempt = async fn => {
         setError('');
-        try { await fn(); } catch (e) { setError(e.detail || e.message || String(e)); }
+        const attemptEpoch = deviceSession.epoch;
+        try { await fn(); } catch (e) {
+            if (attemptEpoch === deviceSession.epoch) setError(e.detail || e.message || String(e));
+        }
     };
-    const ask = (title, text, action) => setConfirm({ title, text, action });
+    const ask = (title, text, action) => setConfirm({ title, text, action: () => { deviceSession.assertSession(epoch); return action(); } });
     const connect = kind => {
         // Start the browser picker in the original click's user activation.
         setError('');
         const pending = deviceSession.connect(kind, { baudRate: Number(baud) });
-        attempt(async () => { await pending; await model.read({ automatic: true }); });
+        attempt(() => pending);
     };
-    const importSource = source => model.edit(source, '已导入编辑器，尚未加载到设备。');
+    // All connections (manual, page restore, hotplug) initialize through one path.
+    useEffect(() => {
+        if (!connected) return;
+        let current = true;
+        (async () => {
+            try {
+                await model.read({ automatic: true });
+                deviceSession.assertSession(epoch);
+                await initAiCfg();
+            } catch (e) {
+                if (current && epoch === deviceSession.epoch) setError(e.detail || e.message || String(e));
+            }
+        })();
+        return () => { current = false; };
+    }, [connected, epoch, model]);
+    const importSource = source => model.edit(source, '已导入编辑器，尚未加载到设备。', epoch);
 
     // 窄屏（≤720px）三栏放不下：左侧面板与 AI 面板互斥，开一个就收另一个
     const isNarrow = () => typeof window !== 'undefined' && window.innerWidth <= 720;
@@ -523,19 +555,12 @@ export default function LuaWorkspace() {
         setUnread(false);
         if (next && isNarrow()) left.setOpen(false);
     };
-    useEffect(() => {
-        const handler = event => {
-            if (model.getSnapshot().draftError) { event.preventDefault(); event.returnValue = ''; }
-        };
-        window.addEventListener('beforeunload', handler);
-        return () => window.removeEventListener('beforeunload', handler);
-    }, [model]);
 
-    const editorStatus = connected
+    const editorStatus = ready
         ? (matchesRam
             ? (device.status?.dirty ? '内存运行 · 尚未保存' : '与运行脚本一致')
-            : '编辑器改动 · 尚未加载')
-        : '本地草稿';
+            : '编辑内容与设备运行脚本不同')
+        : (editor.retained ? '编辑内容已保留 · 等待重连读取（只读）' : connected ? '正在读取设备脚本 · 未就绪' : '请先连接设备');
 
     // 板载脚本操作（左侧「设备」区段）
     const deviceActions = [
@@ -548,25 +573,25 @@ export default function LuaWorkspace() {
         {
             icon: <StorageIcon sx={{ fontSize: 18 }} />,
             title: '从 KV 加载运行', hint: '运行设备上已持久化的脚本',
-            disabled: !connected || locked,
+            disabled: !ready || locked,
             onClick: () => ask('加载 KV', '从 KV 读取并运行脚本，同时替换编辑器内容？', () => model.switchRunning('kv')),
         },
         {
             icon: <DescriptionIcon sx={{ fontSize: 18 }} />,
             title: '运行预制脚本', hint: '切回出厂脚本，已存 KV 保留',
-            disabled: !connected || locked,
+            disabled: !ready || locked,
             onClick: () => ask('运行预制脚本', '切换到预制脚本并替换编辑器内容？已保存的 KV 脚本保留。', () => model.switchRunning('default')),
         },
         {
             icon: <FolderOpenIcon sx={{ fontSize: 18 }} />,
-            title: '预制模板 → 编辑器', hint: '只替换浏览器草稿，不碰设备',
-            disabled: locked,
-            onClick: () => ask('载入预制模板', '用预制脚本替换编辑器内容？此操作只修改浏览器草稿。', () => importSource(defaultSource)),
+            title: '预制模板 → 编辑器', hint: '替换编辑器，尚未加载到设备',
+            disabled: !ready || locked,
+            onClick: () => ask('载入预制模板', '用预制脚本替换编辑器内容？此操作只修改编辑器。', () => importSource(defaultSource)),
         },
         {
             icon: <DeleteOutlineIcon sx={{ fontSize: 18 }} />,
             title: '删除 KV 脚本', hint: '下次启动将运行预制脚本',
-            disabled: !connected || !device.status?.saved,
+            disabled: !ready || locked || !device.status?.saved,
             onClick: () => ask('删除 KV 脚本', '删除持久化脚本？当前脚本继续运行；下次启动运行预制脚本。',
                 async () => { await deviceSession.deleteSaved(); model.notify('已删除 KV 脚本，当前运行脚本保持原样。'); }),
         },
@@ -589,7 +614,7 @@ export default function LuaWorkspace() {
             </Stack>
             <Stack direction="row" spacing={0.75} alignItems="center" sx={{ flexShrink: 0 }}>
                 <Button size="small" variant={aiOpen ? 'contained' : 'outlined'} disableElevation
-                    onClick={toggleAi} sx={{ textTransform: 'none' }}>
+                    disabled={!aiReady} onClick={toggleAi} sx={{ textTransform: 'none' }}>
                     AI 助手{aiRunning ? ' · 工作中' : unread ? ' · 新回复' : ''}
                 </Button>
                 <IconButton size="small" title={`主题：${THEME_LABELS[theme.mode]}`} onClick={theme.cycle}>
@@ -599,24 +624,26 @@ export default function LuaWorkspace() {
         </Box>
 
         {device.busy && <LinearProgress sx={{ height: 2, flexShrink: 0 }} />}
-        {(error || device.error || editor.draftError) && <Box role="alert" className="workspace-notice" sx={{ color: 'var(--panel-danger)' }}>
-            {error || editor.draftError || device.error}
+        {(error || device.error) && <Box role="alert" className="workspace-notice" sx={{ color: 'var(--panel-danger)' }}>
+            {error || device.error}
         </Box>}
-        {!window.isSecureContext && <Box className="workspace-notice">设备连接需要 HTTPS 或 localhost；当前仍可离线编辑。</Box>}
+        {!window.isSecureContext && <Box className="workspace-notice">设备连接需要 HTTPS 或 localhost；请连接设备后读取并编辑脚本。</Box>}
 
         <Box className={`workspace-body${aiOpen ? ' ai-visible' : ''}${left.open ? ' left-visible' : ''}`}>
             {left.open && <>
                 <LeftPanel width={left.width} section={left.section} onSection={left.setSection}
                     scripts={{
-                        onApplyFromFile: importSource,
-                        onEdit: item => importSource(item.script),
-                        onApply: item => { importSource(item.script); attempt(() => model.run(item.script)); },
+                        disabled: !ready || locked,
+                        canExport: editor.ready || editor.retained,
+                        onApplyFromFile: source => attempt(() => importSource(source)),
+                        onEdit: item => attempt(() => importSource(item.script)),
+                        onApply: item => attempt(async () => { importSource(item.script); await model.run(item.script); }),
                         onExport: () => setDialog('export'),
                     }}
                     device={{
-                        connected, transport: device.transport, locked, baud, onBaud: setBaud,
+                        connected, transport: device.transport, locked, baud, onBaud: setBaud, reconnectStatus: device.reconnectStatus,
                         onConnect: connect,
-                        onRefresh: () => attempt(() => deviceSession.refresh()),
+                        onRefresh: () => attempt(async () => { if (!editor.ready) await model.read({ automatic: true }); deviceSession.assertSession(epoch); if (!device.aiReady) await initAiCfg(); deviceSession.assertSession(epoch); await deviceSession.refresh(); }),
                         onDisconnect: () => attempt(() => deviceSession.disconnect()),
                         actions: deviceActions,
                         onInfo: () => setDialog('info'),
@@ -634,7 +661,7 @@ export default function LuaWorkspace() {
                     </span>
                     <Stack direction="row" spacing={0.75} sx={{ ml: 'auto', flexShrink: 0 }}>
                         <Button size="small" variant="outlined" disableElevation startIcon={<PlayArrowIcon />}
-                            disabled={!connected || locked || tooLarge}
+                            disabled={!ready || locked || tooLarge}
                             onClick={() => attempt(() => model.run())} sx={compactBtnSx}>加载到内存</Button>
                         <Button size="small" variant="contained" disableElevation startIcon={<SaveIcon />}
                             disabled={!canSave}
@@ -642,19 +669,19 @@ export default function LuaWorkspace() {
                             sx={compactBtnSx}>写入存储</Button>
                     </Stack>
                 </Box>
-                <Box className="workspace-code" data-testid="lua-editor"><CodeEditor ref={editorRef} value={editor.script} onChange={model.edit} disabled={aiRunning} placeholder="-- 编写 Lua 脚本" /></Box>
+                <Box className="workspace-code" data-testid="lua-editor"><CodeEditor ref={editorRef} value={editor.script} onChange={script => model.edit(script, '', epoch)} disabled={!ready || locked} placeholder={connected ? "正在读取设备脚本…" : "请先连接设备"} /></Box>
                 <DeviceLogPanel />
             </Box>
             {aiOpen && <ColResizeHandle className="workspace-ai-resizer" label="拖动调整 AI 面板宽度（双击重置）"
                 onStart={aiStartDrag} onReset={aiResetWidth} dragging={aiDragging} />}
             <Box component="aside" className="workspace-ai" style={{ '--ai-width': `${aiWidth}px` }} sx={{ display: aiOpen ? 'flex' : 'none' }}>
-                <AiChatPanel open={aiOpen} getScript={model.getScript} applyScript={model.edit}
-                    onRunningChange={setAiRunning} onUnread={setUnread} onFoundLines={lines => editorRef.current?.scrollToLine(lines[0])} />
+                {aiReady ? <AiChatPanel key={epoch} disabled={!!device.busy} open={aiOpen} getScript={() => { model.assertReady(epoch); return model.getScript(); }} applyScript={script => model.edit(script, '', epoch)}
+                    onRunningChange={setAiRunning} onUnread={setUnread} onFoundLines={lines => editorRef.current?.scrollToLine(lines[0])} /> : <Typography sx={{ p: 2, color: 'var(--panel-muted)', fontSize: 13 }}>请连接设备并读取脚本与 AI 配置后使用 AI 助手。</Typography>}
             </Box>
         </Box>
 
         <Box component="footer" className="workspace-footer">
-            <span>{device.busy || (aiRunning ? 'AI 正在处理脚本' : '浏览器自动保留草稿 · 运行不写存储')}</span>
+            <span>{device.busy || (aiRunning ? 'AI 正在处理脚本' : '断线保留编辑 · 加载到内存不会写入存储')}</span>
             <span>{device.status ? `KV ${device.status.saved ? '有已存脚本' : '无已存脚本'} · 分区 ${Math.round(device.status.partitionSize / 1024)} KiB` : '脚本上限 60 KiB · KV 分区 512 KiB'}</span>
         </Box>
 
@@ -663,7 +690,7 @@ export default function LuaWorkspace() {
             anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
             ContentProps={{ sx: { bgcolor: 'var(--panel-titlebar-bg)', color: 'var(--panel-titlebar-ink)', fontSize: 12.5 } }} />
 
-        <LuaExportDialog open={dialog === 'export'} onClose={() => setDialog('')} script={editor.script} onNotify={model.notify} />
+        <LuaExportDialog open={(editor.ready || editor.retained) && dialog === 'export'} onClose={() => setDialog('')} script={editor.script} onNotify={model.notify} />
         <DialogShell open={!!confirm} onClose={() => setConfirm(null)} title={confirm?.title} maxWidth="xs"
             actions={<><Button onClick={() => setConfirm(null)}>取消</Button><Button variant="contained" onClick={() => { const action = confirm.action; setConfirm(null); attempt(action); }}>确认</Button></>}>
             <Typography sx={{ fontSize: 13 }}>{confirm?.text}</Typography>

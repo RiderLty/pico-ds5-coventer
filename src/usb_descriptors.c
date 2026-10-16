@@ -5,6 +5,7 @@
  */
 
 #include "tusb.h"
+#include "pico/unique_id.h"
 
 #include "ds5_pad.h"
 #include "usb_km.h"       // usb_km_apply（动态组装配置描述符）
@@ -203,6 +204,7 @@ enum {
     STRID_MOUSE,     // 3: 16bit 鼠标接口（仅启用时的配置描述符引用）
     STRID_KBD,       // 4: NKRO 键盘接口（同上）
     STRID_IO,        // 5: custom IO 通讯接口（同上）
+    STRID_SERIAL,    // 6: stable board ID for persistent WebUSB permission
 };
 
 // 追加块 = TUD_HID_DESCRIPTOR 展开：接口 9 + HID 9 + 端点 7 = 25 字节
@@ -298,6 +300,9 @@ void usb_km_apply(bool mouse, bool kbd, bool io)
         (kbd ? USB_KM_BIT_KBD : 0u) |
         (mouse ? USB_KM_BIT_MOUSE : 0u) |
         (io ? USB_KM_BIT_IO : 0u));
+    // Chromium revokes permission on unplug when no serial is advertised.
+    // Keep the same board ID across all WinUSB layouts; baseline remains unchanged.
+    desc_device.iSerialNumber = io ? STRID_SERIAL : 0;
 
     // 自检：三项都不追加时，RAM 副本必须与 flash 基线逐字节一致，
     // 否则说明基线构造/回填有偏差，会静默改变主机看到的接口布局
@@ -601,6 +606,16 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
         case 0xEE:   // 首次基线枚举也必须应答，避免 osvc=0000 负缓存
             return (uint16_t const *)desc_string_ms_os_10();
+
+        case STRID_SERIAL: {
+            if (!desc_device.iSerialNumber) return NULL;
+            char serial[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
+            // SDK caches the OTP ID before main; no Flash transaction in this callback.
+            pico_get_unique_board_id_string(serial, sizeof serial);
+            chr_count = (uint8_t)strlen(serial);
+            for (uint8_t i = 0; i < chr_count; i++) _desc_str[1 + i] = serial[i];
+            break;
+        }
 
         default:
             if (index >= sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) {

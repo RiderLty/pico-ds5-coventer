@@ -3,6 +3,7 @@
 #include "lua_binder.h"
 #include "lua_default_script.h"
 #include "input_app.h"
+#include "usb_km.h"
 #include "kvstore.h"
 #include "pico/critical_section.h"
 #include "pico/time.h"
@@ -29,6 +30,9 @@ static proto_chan_t *s_owner;
 static uint32_t s_owner_generation;
 static uint64_t s_upload_time;
 static bool s_kv_ok, s_saved, s_dirty;
+static bool s_boot_loading;
+static bool s_upload_ai;
+static char s_ai_image[AI_CFG_MAX]; // bounded scratch; never put 4 KiB on the core1 stack
 static char s_error[160];
 
 static uint32_t get32(const uint8_t *p) {
@@ -45,11 +49,15 @@ static uint32_t checksum(const void *data, size_t size) {
 }
 static void discard_upload(void) {
     free(s_upload); s_upload = NULL; s_expected = s_received = 0; s_owner = NULL;
+    s_upload_ai = false;
 }
 static bool owns_upload(void) {
     return s_upload && s_owner == s_job.ch && s_owner_generation == s_job.generation;
 }
 static bool load_default(void) {
+    // A failed boot script may have submitted dev_enable before throwing.
+    // Its partial capabilities must not leak into the first enumeration.
+    if (s_boot_loading) usb_km_request(0, 0, 0);
     input_app_release_outputs();
     lua_binder_deinit();
     free(s_owned); s_owned = NULL;
@@ -93,8 +101,11 @@ void lua_script_init(void) {
     critical_section_init_with_lock_num(&s_lock, next_striped_spin_lock_num());
 }
 void lua_script_boot(void) {
+    s_boot_loading = true;
+    usb_km_request(0, 0, 0);
     s_kv_ok = lua_store_init();
     read_saved(false); // absent, corrupt or invalid script always falls back to embedded
+    s_boot_loading = false;
 }
 void lua_script_request(proto_chan_t *ch, uint16_t id, const uint8_t *data, uint16_t len) {
     if (len > sizeof s_job.data) {
@@ -121,7 +132,7 @@ static uint8_t execute(void) {
     uint16_t n = s_job.len;
     if (!n) return PROTO_ERR_LENGTH;
     unsigned op = p[0];
-    if (op != 1 && op != 2 && op != 5 && n != 1) return PROTO_ERR_LENGTH;
+    if (op != 1 && op != 2 && op != 5 && op != 12 && op != 13 && n != 1) return PROTO_ERR_LENGTH;
     s_job.len = 0;
     if (s_upload && !owns_upload() && op != 0 && op != 5 && op != 10) return PROTO_ERR_BUSY;
     switch (op) {
@@ -136,9 +147,11 @@ static uint8_t execute(void) {
         s_job.len = len; break;
     }
     case 1:
-        if (n != 9 || !get32(p+1) || get32(p+1)>LUA_SCRIPT_MAX) return PROTO_ERR_LENGTH;
+    case 13:
+        if (n != 9 || !get32(p+1) || get32(p+1)>(op == 13 ? AI_CFG_MAX : LUA_SCRIPT_MAX)) return PROTO_ERR_LENGTH;
         if (s_upload && !owns_upload()) return PROTO_ERR_BUSY;
         discard_upload(); s_expected=get32(p+1); s_crc=get32(p+5);
+        s_upload_ai = op == 13;
         s_upload=malloc(s_expected);
         if (!s_upload) { s_expected=0; snprintf(s_error,sizeof s_error,"out of memory staging script"); return PROTO_ERR_SCRIPT; }
         s_owner=s_job.ch; s_owner_generation=s_job.generation; s_upload_time=time_us_64(); break;
@@ -149,6 +162,7 @@ static uint8_t execute(void) {
         memcpy(s_upload+s_received,p+5,n-5u); s_received+=n-5u; s_upload_time=time_us_64(); break;
     case 3:
         if (!owns_upload()) return PROTO_ERR_BUSY;
+        if (s_upload_ai) return PROTO_ERR_COMMAND;
         if (s_received!=s_expected) return PROTO_ERR_LENGTH;
         if (checksum(s_upload,s_received)!=s_crc) return PROTO_ERR_CRC;
         if (!run_upload()) return PROTO_ERR_SCRIPT;
@@ -182,6 +196,32 @@ static uint8_t execute(void) {
         break;
     case 10:
         s_job.len=strlen(s_error); memcpy(p,s_error,s_job.len); break;
+    case 11:
+    case 12: {
+        if (op == 12 && n != 7) return PROTO_ERR_LENGTH;
+        size_t size = 0;
+        int rc = lua_store_ai_read(s_ai_image, sizeof s_ai_image, &size);
+        if (rc) { snprintf(s_error,sizeof s_error,"KV: %s",kvs_strerror(rc)); return PROTO_ERR_STORAGE; }
+        if (op == 11) {
+            s_job.len = snprintf((char *)p, 512, "{\"size\":%u,\"crc32\":%lu,\"maxSize\":%u}",
+                (unsigned)size, (unsigned long)checksum(s_ai_image,size), AI_CFG_MAX);
+        } else {
+            uint32_t offset=get32(p+1); unsigned count=p[5]|(unsigned)p[6]<<8;
+            if (offset>size || count>512 || count>size-offset) return PROTO_ERR_LENGTH;
+            memcpy(p,s_ai_image+offset,count); s_job.len=count;
+        }
+        memset(s_ai_image, 0, sizeof s_ai_image);
+        break;
+    }
+    case 14: {
+        if (!owns_upload()) return PROTO_ERR_BUSY;
+        if (!s_upload_ai) return PROTO_ERR_COMMAND;
+        if (s_received!=s_expected) return PROTO_ERR_LENGTH;
+        if (checksum(s_upload,s_received)!=s_crc) return PROTO_ERR_CRC;
+        int rc = lua_store_ai_save(s_upload,s_received);
+        if (rc) { snprintf(s_error,sizeof s_error,"KV: %s",kvs_strerror(rc)); return PROTO_ERR_STORAGE; }
+        discard_upload(); break;
+    }
     default: return PROTO_ERR_COMMAND;
     }
     return 0;

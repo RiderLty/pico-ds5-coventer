@@ -1,6 +1,7 @@
 // One shared device connection for the workspace and AI. The protocol module is
 // imported from tools so this application and the diagnostic page stay in sync.
 import { PicoDevice } from '../../../tools/pico-device.mjs';
+import { UsbReconnect } from './usbReconnect.js';
 
 export const SCRIPT_MAX_BYTES = 60 * 1024;
 
@@ -11,18 +12,20 @@ export class DeviceSession {
         this.logListeners = new Set();
         this.epoch = 0;
         this.operation = null;
-        this.snapshot = { state: device.state, transport: null, busy: '', status: null, error: '', info: '', ramSource: null };
+        this.snapshot = { state: device.state, transport: null, busy: '', status: null, error: '', info: '', ramSource: null, aiCfg: null, aiReady: false, reconnectStatus: '' };
+        this.usbReconnect = new UsbReconnect(this);
         device.onStateChange(state => {
             if (state === 'connecting' || state === 'disconnected') {
                 this.epoch++;
                 this.operation = null;
             }
             this.update({ state, transport: device.transportType,
-                ...(state !== 'connected' ? { status: null, ramSource: null, info: '', busy: '' } : {}) });
+                ...(state === 'connecting' ? { error: '' } : {}),
+                ...(state !== 'connected' ? { status: null, ramSource: null, info: '', busy: '', aiCfg: null, aiReady: false } : {}) });
         });
         device.onLog(text => { for (const fn of this.logListeners) fn(text); });
-        device.onError(error => this.update({ error: error.message }));
-        device.onClose(error => { if (error) this.update({ error: error.message }); });
+        device.onError(error => { if (!this.usbReconnect.automatic) this.update({ error: error.message }); });
+        device.onClose(error => { if (error && !this.usbReconnect.automatic) this.update({ error: error.message }); });
     }
 
     update(patch) {
@@ -37,8 +40,15 @@ export class DeviceSession {
     }
 
     // Call synchronously from the click handler, preserving browser user activation.
-    connect(kind, options) { return this.device.connect(kind, options); }
-    disconnect() { return this.device.disconnect(); }
+    connect(kind = 'winusb', options) {
+        this.usbReconnect.manualStart();
+        return this.device.connect(kind, options).then(result => {
+            this.usbReconnect.manualDone(kind, this.device.usbDevice);
+            return result;
+        }, error => { this.usbReconnect.manual = false; throw error; });
+    }
+    disconnect() { this.usbReconnect.disconnect(); return this.device.disconnect(); }
+    watchUsb() { return this.usbReconnect.start(); }
 
     async metadata(epoch, options) {
         const status = await this.device.scriptStatus(options);
@@ -49,7 +59,7 @@ export class DeviceSession {
         return status;
     }
 
-    async perform(label, fn, options) {
+    async perform(label, fn, options, scriptOperation = true) {
         this.assertSession(this.epoch);
         if (this.operation) throw new Error('设备正在处理脚本，请等待当前操作完成');
         const epoch = this.epoch;
@@ -63,14 +73,35 @@ export class DeviceSession {
         } catch (error) {
             if (this.device.connected && epoch === this.epoch) {
                 // Failed RUN may have switched the board back to its built-in script.
-                this.update({ ramSource: null });
-                try { await this.metadata(epoch, options); } catch { /* preserve the original failure */ }
+                if (scriptOperation) {
+                    this.update({ ramSource: null });
+                    try { await this.metadata(epoch, options); } catch { /* preserve the original failure */ }
+                }
                 if (epoch === this.epoch) this.update({ error: error.detail || error.message });
             }
             throw error;
         } finally {
             if (this.operation === operation) { this.operation = null; this.update({ busy: '' }); }
         }
+    }
+
+    readAiCfg(options) {
+        return this.perform('读取 AI 配置', async epoch => {
+            this.update({ aiReady: false });
+            const cfg = await this.device.aiCfgGet(options);
+            this.assertSession(epoch);
+            if (cfg !== null && (typeof cfg !== 'object' || Array.isArray(cfg))) throw new Error('设备 AI 配置格式无效');
+            this.update({ aiCfg: cfg });
+            return cfg;
+        }, options, false);
+    }
+    saveAiCfg(cfg, options) {
+        return this.perform('保存 AI 配置', async epoch => {
+            await this.device.aiCfgSet(cfg, options);
+            this.assertSession(epoch);
+            this.update({ aiCfg: cfg, aiReady: true });
+            return true;
+        }, options, false);
     }
 
     read(options) {

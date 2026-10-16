@@ -33,18 +33,30 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 
 ## 切换流程与约束
 
+首次启动先完成双核 Flash 安全初始化和队列初始化。core1 读取 KV 并运行启动脚本，
+以原子握手通知 core0 顶层代码已结束，随后暂停 Host 初始化、事件回调和 `tick`。
+core0 在 `tusb_init(0, ...)` 前调用 `usb_km_task()`，直接应用最终能力、描述符及实例号，
+再启动 Device 并放行 core1。首次枚举不调用 `tud_disconnect()`，也不等待 500ms。
+多次顶层设置只提交最终目标；保存脚本报错时先清空其部分请求，再执行预制脚本。
+未设置额外能力时仍使用 flash 基线。握手不占新锁、不使用 Flash lockout 所需的 FIFO，
+等待期间保持 IRQ 可用，支持空白 KV 初始化时的跨核 Flash lockout。
+
+用户可将 `dev_enable(1, 1, 1)` 写在脚本顶层，保存后重新上电，直接以全开配置枚举。
+顶层查询 `*_is_on()` 仍返回已应用状态；不能在顶层循环等待能力应用。
+以下为 USB 启动后的运行期流程（含网页上传运行、`tick` 和 BOOT 回调）：
+
 1. core1 的 Lua 提交目标状态，由原子变量传给 core0。调用是异步的。
 2. core0 `usb_km_task()` 检测到目标不同；相同状态不重枚举。
 3. 设备栈已初始化时调用 `tud_disconnect()`，等待 500ms 让主机观察断开。
    core0 暂停 USB 上报；core1 仍处理输入。
-4. `usb_km_apply(mouse, kbd)` 复制 227B 基线，按鼠标、键盘顺序追加接口，
-   回填 `wTotalLength`、`bNumInterfaces` 和键盘接口编号。
+4. `usb_km_apply(mouse, kbd, io)` 复制 227B 基线，按鼠标、键盘、IO 顺序追加接口，
+   回填 `wTotalLength`、`bNumInterfaces` 和接口编号。
 5. 更新键盘 HID 实例号、键盘队列开关、关闭侧队列与生效状态。
 6. 调用 `tud_connect()`，恢复主循环，等待主机复位与配置新设备。
    真正完成挂载由 `tud_mount_cb()` 的 `MOUNTED` 日志确认。
 
 注意 Lua API 的参数顺序为 **键盘、鼠标**，内部描述符组装函数为 **鼠标、键盘**。
-只在 USB 断开窗口内替换配置描述符，报告描述符按 HID 实例号分发。
+在 USB 首次连接前或运行期断开窗口内替换配置描述符，报告描述符按 HID 实例号分发。
 不要在 Lua/core1 直接调用 `tud_*` 或改写设备描述符。
 
 当前采用已验证的断开 → 500ms → apply → 连接流程，没有引入设备栈反复 deinit/init。
@@ -126,9 +138,13 @@ proto 通道就绪前的 boot 极早期日志直接丢弃。TinyUSB debug 日志
 
 ## 主线默认行为
 
-- 上电仅返回 flash 基线，键鼠与 IO 开关均为 false。
-- 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `dev_enable(1, 1, 1)`。
-  计时从 Lua tick 启动开始，不从主机首次挂载开始；主机晚连接时可能直接看到键鼠配置。
+- 使用预制脚本上电仅返回 flash 基线，键鼠与 IO 开关均为 false；KV 脚本可在顶层修改首次枚举配置。
+- 默认脚本把累计 `tick(dt_us)` 约 5 秒后请求 `dev_enable(1, 1, 1)` 的代码整段注释保留。
+  该示例用于运行期间延后启用键盘、鼠标和 WinUSB；取消注释即可恢复。
+  计时从脚本 tick 开始，不从主机首次挂载开始；首次枚举启用请直接使用顶层调用。
+- 当前默认不自动启用额外接口。运行中按下再松开 BOOT 会请求 `dev_enable(-1, -1, 1)`，
+  仅开启 WinUSB；Lua `on_boot_button(pressed)` 可自行调用 `dev_enable` 并在松开时返回
+  `true` 拦截默认动作，见 [BOOT 用法](lua-scripts.md#boot-按键与接口启用)。
 - `USB_KM_BOOT`、`USB_KM_HOT_TEST` 和首次挂载后 15 秒等待仅用于故障隔离，已删除。
 - TinyUSB 默认 debug=0；设备日志统一走 DEBUG → PRINT 通道。
 - 关闭键盘时清按键状态，关闭鼠标时清队列，Lua 请求关闭鼠标也会清按键掩码。
@@ -137,7 +153,8 @@ proto 通道就绪前的 boot 极早期日志直接丢弃。TinyUSB debug 日志
 ## 日志与排查
 
 用网页控制台连接 HID 或串口查看 DEBUG 日志（PRINT 消息，绿色 Pico 行）。
-正常请求启用后应看到以下关键日志（启动时也有 `queues initialized`）：
+以下以脚本请求 `dev_enable(1, 1, 1)` 为例（启动时也有 `queues initialized`）；
+默认 BOOT 松开仅启用 IO，日志中的键鼠位保持原值：
 
 ```text
 [DS5C][KM] reload: old(kbd=0 mouse=0 io=0) -> new(kbd=1 mouse=1 io=1), ...
@@ -167,6 +184,7 @@ cmake --build build-debug -j8
 - 初始描述符直接含键鼠能够枚举，排除了“追加后描述符本身必然无法枚举”的判断。
 - 基线 DS5 首次挂载后等待 15 秒，再放行 Lua 启用请求，热重载后工作正常。
 
-上述第二项使用临时验证版，以确保先观察基线挂载再切换；主线恢复默认脚本的 5 秒计时。
+上述第二项使用临时验证版，以确保先观察基线挂载再切换；验证当时主线恢复了默认脚本的
+5 秒计时。当前该计时代码已注释保留，默认改由 BOOT 松开时请求启用 WinUSB。
 清理后的主线分别做 TinyUSB debug=2 与 debug=0 编译验证，未新增硬件实测。
 反复开关、单独键盘/鼠标与跨操作系统兼容性尚未逐项实测。

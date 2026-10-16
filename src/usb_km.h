@@ -8,9 +8,9 @@
  * usb_km — NKRO 键盘 / 16bit 鼠标 / custom IO 通讯接口的运行期开关（参考
  * pico-hid-mapper 的 usb_desc_config_apply + runtime reconfigure 路径）。
  *
- * 默认**全关**：boot 时配置描述符回调返回 flash 基线（DS5 + 音频），与无
- * km 模块时逐字节一致。Lua dev_enable(kbd, mouse, io) 请求变更（三态参数，
- * 见 usb_km_request）
+ * 默认**全关**。core0 等待启动脚本顶层完成，在 tud_init 前直接应用其
+ * 最终目标；全关时配置描述符仍为 flash 基线（DS5 + 音频）。
+ * 运行期 Lua dev_enable(kbd, mouse, io) 请求变更（三态参数，见 usb_km_request）
  * （core1）→ usb_km_task()（core0 主循环）在重枚举窗口内惰性 apply +
  * USB 重枚举（tud_disconnect → apply → tud_connect，期间设备从主机消失
  * 约 0.5s，DS5 上报同步暂停）。
@@ -47,7 +47,8 @@ void usb_km_request(int kbd, int mouse, int io);
 // 队列和状态初始化（必须在双核启动前调用）。
 void usb_km_init(void);
 
-// core0 主循环调用：有未应用的请求则重枚举切换（无请求时仅一次原子读）
+// core0：启动脚本完成后、tud_init 之前先调用一次；之后主循环轮询。
+// 未初始化 Device 时直接应用；已初始化时有变化才断开并重枚举。
 void usb_km_task(void);
 
 // core0 主循环调用：键盘/鼠标输出队列出队发送（接口未启用时内部直接返回）

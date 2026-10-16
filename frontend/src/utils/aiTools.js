@@ -4,6 +4,7 @@
 // 故意不暴露 luaSave/写入 flash——持久化永远由用户手动「写入存储」。
 // ---------------------------------------------------------------------------
 import { picoLogs, clearLogs, subscribeLogs } from './logStore';
+import { deviceSession } from './deviceSession';
 import { luaSet, luaState } from './picoApi';
 
 const SCRIPT_MAX_BYTES = 60 * 1024;
@@ -146,7 +147,10 @@ export const AI_TOOLS = [
 ];
 
 // ── 撤销栈：每次 AI 编辑前压栈 ──
-const undoStack = [];   // [{ before, after, ts, tool, explanation }]
+const undoStack = []; // [{ before, after, ts, tool, explanation }]
+deviceSession.subscribe(() => {
+    if (deviceSession.getSnapshot().state !== 'connected') undoStack.length = 0;
+});
 const UNDO_MAX = 20;
 
 // 单调递增时间戳：同一毫秒内连续多次编辑会使 Date.now() 碰撞，
@@ -294,6 +298,7 @@ export async function executeTool(call, ctx) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) return { ok: false, error: '参数必须是 JSON 对象', hint: '请用对象形式重新调用' };
     if (ctx.signal?.aborted) return { ok: false, aborted: true, error: '用户已停止，工具未执行' };
     try {
+        ctx.getScript(); // asserts the workspace connection is still current
         switch (name) {
             case 'read_current_script': {
                 const result = toolReadScript(ctx, args);

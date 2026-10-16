@@ -11,6 +11,7 @@
  * 未接入时报告维持空闲态（摇杆回中、按键全零）。
  */
 
+#include <stdint.h>
 #include <string.h>
 
 #include "pico/time.h"
@@ -79,6 +80,7 @@ static uint32_t s_pad_btnmask;      // bit n = hidkit BTN_* n 按住
 // 触摸板输入状态（DS5 原生 12-bit 坐标，2 触点）
 static uint16_t s_touch_x0, s_touch_y0, s_touch_x1, s_touch_y1;
 static bool     s_touch1, s_touch2;
+static uint8_t  s_touch_id0, s_touch_id1, s_next_touch_id;
 
 // 六轴输入状态（±32767，陀螺 ±2000dps / 加速度 ±4g）
 static int16_t  s_gx, s_gy, s_gz, s_ax, s_ay, s_az;
@@ -103,6 +105,9 @@ static uint8_t s_report[DS_REPORT_LEN];
 void ds5_pad_init(void)
 {
     memcpy(s_report, s_report_template, sizeof(s_report));
+    s_touch_id0 = s_touch_id1 = s_next_touch_id = 0;
+    clear_touch_motion();
+    ds5_pad_tick(); // never expose template contacts before the first main-loop tick
 }
 
 static void btn_set(uint8_t btn, bool pressed)
@@ -165,12 +170,35 @@ void ds5_pad_feed_pad(const uint8_t *data, uint8_t len)
 void ds5_pad_feed_touch(const uint8_t *data, uint8_t len)
 {
     if (len < INQ_TOUCH_PAYLOAD) return;
-    s_touch_x0 = (uint16_t)(data[0] | ((uint16_t)data[1] << 8));
-    s_touch_y0 = (uint16_t)(data[2] | ((uint16_t)data[3] << 8));
-    s_touch_x1 = (uint16_t)(data[4] | ((uint16_t)data[5] << 8));
-    s_touch_y1 = (uint16_t)(data[6] | ((uint16_t)data[7] << 8));
-    s_touch1   = (data[8] & 0x01u) != 0;
-    s_touch2   = (data[8] & 0x02u) != 0;
+    bool down0 = (data[8] & 0x01u) != 0;
+    bool down1 = (data[8] & 0x02u) != 0;
+    if (down0 && !s_touch1) {
+        s_touch_id0 = s_next_touch_id;
+        s_next_touch_id = (s_next_touch_id + 1u) & 0x7fu;
+        if (s_touch2 && s_touch_id0 == s_touch_id1) {
+            s_touch_id0 = s_next_touch_id;
+            s_next_touch_id = (s_next_touch_id + 1u) & 0x7fu;
+        }
+    }
+    if (down1 && !s_touch2) {
+        s_touch_id1 = s_next_touch_id;
+        s_next_touch_id = (s_next_touch_id + 1u) & 0x7fu;
+        if (down0 && s_touch_id1 == s_touch_id0) {
+            s_touch_id1 = s_next_touch_id;
+            s_next_touch_id = (s_next_touch_id + 1u) & 0x7fu;
+        }
+    }
+    // Preserve last coordinates on release; input snapshots use zero for absent points.
+    if (down0) {
+        s_touch_x0 = (uint16_t)(data[0] | ((uint16_t)data[1] << 8));
+        s_touch_y0 = (uint16_t)(data[2] | ((uint16_t)data[3] << 8));
+    }
+    if (down1) {
+        s_touch_x1 = (uint16_t)(data[4] | ((uint16_t)data[5] << 8));
+        s_touch_y1 = (uint16_t)(data[6] | ((uint16_t)data[7] << 8));
+    }
+    s_touch1 = down0;
+    s_touch2 = down1;
 }
 
 void ds5_pad_feed_motion(const uint8_t *data, uint8_t len)
@@ -239,23 +267,25 @@ static void update_pad_buttons(void)
 }
 
 // DS5 触摸点写入（12-bit 坐标打包，内核 hid-playstation.c 格式）：
-//   byte[0] = x & 0xFF
-//   byte[1] = ((y >> 8) & 0x0F) << 4 | ((x >> 8) & 0x0F)
-//   byte[2] = y & 0xFF
-//   byte[3] = touching ? 0x00 : 0x80  (bit7=1 = 未触摸)
-static void pack_touch_point(uint8_t *p, uint16_t x, uint16_t y, bool touching)
+//   byte[0] = contact ID (bit0..6) | inactive (bit7)
+//   byte[1] = x & 0xFF
+//   byte[2] = (y & 0x0F) << 4 | ((x >> 8) & 0x0F)
+//   byte[3] = y >> 4
+static void pack_touch_point(uint8_t *p, uint16_t x, uint16_t y, bool touching, uint8_t id)
 {
-    p[0] = (uint8_t)(x & 0xFF);
-    p[1] = (uint8_t)((((y >> 8) & 0x0F) << 4) | ((x >> 8) & 0x0F));
-    p[2] = (uint8_t)(y & 0xFF);
-    p[3] = touching ? 0x00u : 0x80u;
+    if (x > 0xfffu) x = 0xfffu;
+    if (y > 0xfffu) y = 0xfffu;
+    p[0] = (id & 0x7fu) | (touching ? 0x00u : 0x80u);
+    p[1] = (uint8_t)x;
+    p[2] = (uint8_t)(((y & 0x0fu) << 4) | (x >> 8));
+    p[3] = (uint8_t)(y >> 4);
 }
 
 // 触摸板 2 触点直通
 static void update_touch(void)
 {
-    pack_touch_point(&s_report[OFF_TOUCH],      s_touch_x0, s_touch_y0, s_touch1);
-    pack_touch_point(&s_report[OFF_TOUCH + 4],  s_touch_x1, s_touch_y1, s_touch2);
+    pack_touch_point(&s_report[OFF_TOUCH],      s_touch_x0, s_touch_y0, s_touch1, s_touch_id0);
+    pack_touch_point(&s_report[OFF_TOUCH + 4],  s_touch_x1, s_touch_y1, s_touch2, s_touch_id1);
 }
 
 // 六轴直通（3 字节 LE → 报告内 int16 LE）
