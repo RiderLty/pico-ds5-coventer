@@ -27,6 +27,8 @@ awalol/DS5Dongle（UAC1 音频接口 0-2 + DS5 接口 3）。
   `BUILD_TYPE` / `JOBS` / `TUSB_DEBUG_LEVEL` / `DEBUG_BAUDRATE` 可覆盖，额外 CMake 参数置于 `--` 后。
 - `.github/workflows/release.yml` 在推送 `v*` tag 或手动指定已有 `v*` tag 时构建发布，直接调用 `build.sh`，
   发布 UF2 / ELF / BIN 与 SHA256SUMS；不在 CI 中另写一套依赖准备或构建逻辑。
+- `.github/workflows/pages.yml` 仅在 `main` 的前端及打包依赖有修改时构建并部署 GitHub Pages，
+  也支持手动运行；前端构建与发布说明见 `frontend/README.md`。
 - 回归命令见 `docs/pico-device.md` 与 `docs/lua-scripts.md`；`src/CMakeLists.txt` 开 `-Wall -Wextra`。
 - 烧录：按住 BOOTSEL 插 USB，拷贝 uf2。
 - 调试构建：`cmake -S . -B build-debug -DTUSB_DEBUG_LEVEL=2`（级别 0..3；2 会打印
