@@ -35,7 +35,9 @@ static bool    s_events[BOOT_EVENT_DEPTH];
 
 void boot_button_init(void)
 {
-    critical_section_init(&s_cs);
+    // 启动时独占锁池（24..31）已由 debug、input_queue 与 TinyUSB 用满。
+    // 此短临界区使用 SDK 条带锁，避免第九次独占申请让 USB 初始化 panic。
+    critical_section_init_with_lock_num(&s_cs, next_striped_spin_lock_num());
     s_head = s_tail = s_count = 0;
 }
 

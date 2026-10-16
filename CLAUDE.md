@@ -141,6 +141,10 @@ C 注册函数，一律以**目标**为前缀：`kbd_`（宿主键盘）/ `mouse
   `critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num())`。
 - **锁号撞号**：`spin_lock_init(固定 ID)` 不入池登记，会与后续 `critical_section_init`
   领到的锁撞号并自锁。须用 `spin_lock_claim_unused(true)` 正式领取（见 `debug.c`）。
+- **独占锁池容量**：24..31 只有 8 把，debug（1）、input_queue（1）、TinyUSB Host
+  （3）、Device（2）和原生 USB 控制器（1）在启动时已用满。新增短临界区须用
+  `critical_section_init_with_lock_num(..., next_striped_spin_lock_num())`，否则
+  `critical_section_init()` 申请第 9 把会在 USB 初始化时 panic（BOOTSEL 队列曾触发）。
 - **GPIO 复用 FUNCSEL**：RP2350 上 GPIO2/3 的 UART0 功能在 FUNCSEL 11
   （`GPIO_FUNC_UART_AUX`），写 RP2040 时代的 `GPIO_FUNC_UART` 引脚根本不接 UART。
   必须用 `UART_FUNCSEL_NUM(UART, pin)`。
