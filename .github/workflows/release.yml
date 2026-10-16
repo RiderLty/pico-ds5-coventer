@@ -28,9 +28,11 @@ jobs:
       matrix:
         include:
           - variant: usb-pico2
-            args: ''
+            args: '--usb'
           - variant: bluetooth-pico2w
-            args: '--bluetooth'
+            args: '--pico2w'
+          - variant: bluetooth-waveshare-rp2350b-plus-w
+            args: '--waveshare'
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
@@ -57,7 +59,7 @@ jobs:
           BUILD_ARGS: ${{ matrix.args }}
         run: ./build.sh $BUILD_ARGS --build-dir build
       - name: Test Bluetooth report and lifecycle handling
-        if: matrix.variant == 'bluetooth-pico2w'
+        if: startsWith(matrix.variant, 'bluetooth-')
         run: python3 tools/test_ds5_bt.py
       - name: Prepare release assets
         env:
@@ -75,7 +77,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish both firmware variants
+    name: Publish all three firmware variants
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -96,16 +98,19 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TAG }} — USB / Bluetooth
+          name: ${{ env.RELEASE_TAG }} — USB / Bluetooth Pico 2 W / Waveshare
           generate_release_notes: true
           body: |
             ### 固件下载
             - **usb-pico2.uf2**：Pico 2，GPIO12/13 PIO-USB 输入，支持键鼠 / HID / XInput / Switch Pro。
             - **bluetooth-pico2w.uf2**：Pico 2 W 板载经典蓝牙输入，支持 DualSense / DualSense Edge；不启用 PIO-USB Host。
+            - **bluetooth-waveshare-rp2350b-plus-w.uf2**：Waveshare RP2350B-Plus-W（RP2350B + RM2，16 MiB Flash）蓝牙版，同样支持 DualSense / Edge。
 
-            蓝牙版：手柄关机后按住 **PS + Create** 直到快速闪烁，等待 Pico 2 W 自动配对；成功后板载 LED 常亮。配对密钥独立存储，重启后按 PS 重连。上板兼容性仍需实际设备验证。
+            两个蓝牙板型的无线引脚与 Flash 容量不同，UF2 不可混刷。
 
-            两版都通过原生 USB 输出 DS5，保留 Lua、BOOT 启用 WinUSB、网页编辑与 AI 配置功能。请按硬件选择 UF2；ELF/BIN 用于调试，SHA256SUMS 用于校验。
+            蓝牙版：手柄关机后按住 **PS + Create** 直到快速闪烁，等待对应无线板自动配对；成功后板载 LED 常亮。配对密钥独立存储，重启后按 PS 重连。上板兼容性仍需实际设备验证。
+
+            三版都通过原生 USB 输出 DS5，保留 Lua、BOOT 启用 WinUSB、网页编辑与 AI 配置功能。请按硬件选择 UF2；ELF/BIN 用于调试，SHA256SUMS 用于校验。
 
             [网页工作台](https://riderlty.github.io/pico-ds5-coventer/) · [蓝牙说明](https://github.com/RiderLty/pico-ds5-coventer/blob/main/docs/bluetooth.md)
           fail_on_unmatched_files: true

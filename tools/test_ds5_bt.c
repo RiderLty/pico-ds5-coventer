@@ -119,7 +119,8 @@ int main(void)
     // Failure must leave configuration/Lua usable and never poll an uninitialized radio.
     radio_failure = 1; ds5_bt_init(); assert(!radio_ready); ds5_bt_task();
     radio_failure = 0; ds5_bt_init(); assert(radio_ready && connection_filter);
-    assert(ds5_bt_flash_storage_offset() == 0x37e000u);
+    assert(ds5_bt_flash_storage_offset() ==
+           (PICO_FLASH_SIZE_BYTES == 16777216u ? 0xf7e000u : 0x37e000u));
     uint8_t state[] = {BTSTACK_EVENT_STATE, 1, HCI_STATE_WORKING};
     hci_event(state, sizeof(state)); ds5_bt_task(); assert(scans == 1);
     uint8_t done[] = {GAP_EVENT_INQUIRY_COMPLETE, 1, 0};

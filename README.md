@@ -1,6 +1,6 @@
 # pico-ds5-coventer
 
-USB / 蓝牙输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 / Pico 2 W (RP2350)。
+USB / 蓝牙输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 / Pico 2 W / Waveshare RP2350B-Plus-W (RP2350)。
 
 [网页工作台](https://riderlty.github.io/pico-ds5-coventer/) · [下载 USB / 蓝牙固件](https://github.com/RiderLty/pico-ds5-coventer/releases/latest) · [蓝牙配对与构建说明](docs/bluetooth.md)
 输入侧由 [hidkit](https://github.com/RiderLty/hidkit) 解析键盘、鼠标、HID 手柄，
@@ -26,7 +26,7 @@ USB / 蓝牙输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi P
 
 ## 功能与默认行为
 
-- 可选蓝牙变体：`./build.sh --bluetooth`，使用 Pico 2 W 板载经典蓝牙连接 DualSense / Edge，
+- 可选蓝牙变体：`./build.sh --pico2w`（官方 Pico 2 W）或 `./build.sh --waveshare`（微雪 RP2350B-Plus-W），使用板载经典蓝牙连接 DualSense / Edge，
   替换 PIO-USB Host。PS + Create 首次配对，PS 重连；密钥与 Lua/AI KV 分区隔离。
   详见 [蓝牙说明与验证范围](docs/bluetooth.md)。
 
@@ -166,9 +166,16 @@ hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个�
 ./build.sh
 # 产物：build/src/pico-ds5-coventer.uf2
 
-# Pico 2 W 蓝牙输入版
-./build.sh --bluetooth
-# 产物：build-bluetooth/src/pico-ds5-coventer.uf2
+# 显式 USB 版，与不加参数相同
+./build.sh --usb
+
+# 官方 Pico 2 W 蓝牙输入版
+./build.sh --pico2w
+# 产物：build-bluetooth-pico2w/src/pico-ds5-coventer.uf2
+
+# Waveshare RP2350B-Plus-W 蓝牙输入版
+./build.sh --waveshare
+# 产物：build-bluetooth-waveshare/src/pico-ds5-coventer.uf2
 
 # 已准备好依赖时跳过 setup（支持离线增量编译）
 ./build.sh --skip-setup
@@ -187,9 +194,9 @@ Host 引脚在 `src/main.c` 的 `pio_cfg.pin_dp` 设置。
 ### 自动发布
 
 推送 `v*` tag 到 GitHub 后，`.github/workflows/release.yml` 调用同一个 `build.sh`
-分别编译 USB / Pico 2 和蓝牙 / Pico 2 W Release 固件；两个任务都成功后创建对应 tag 的
+分别编译 USB / Pico 2、蓝牙 / Pico 2 W、蓝牙 / Waveshare RP2350B-Plus-W 固件；三个任务都成功后创建对应 tag 的
 GitHub Release 并自动生成发布说明。附件包含带版本号与 `usb-pico2` / `bluetooth-pico2w`
-后缀的两套 `.uf2`、`.elf`、`.bin` 和统一 `SHA256SUMS`。
+/ `bluetooth-waveshare-rp2350b-plus-w` 后缀的三套 `.uf2`、`.elf`、`.bin` 和统一 `SHA256SUMS`。
 
 ```bash
 git tag v1.0.0

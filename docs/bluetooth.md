@@ -1,24 +1,26 @@
-# 蓝牙固件（Pico 2 W）
+# 蓝牙固件（Pico 2 W / Waveshare）
 
 [下载最新固件](https://github.com/RiderLty/pico-ds5-coventer/releases/latest) · [网页工作台](https://riderlty.github.io/pico-ds5-coventer/)
 
-同一版本提供两套固件，请按输入方式与板卡选择：
+同一版本提供三套固件，请按输入方式与板卡选择：
 
 | Release 附件后缀 | 板卡 | 输入 |
 |---|---|---|
 | `usb-pico2.uf2` | Raspberry Pi Pico 2 | GPIO12/13 的 PIO-USB，键鼠 / HID / Xbox XInput / Switch Pro |
-| `bluetooth-pico2w.uf2` | Raspberry Pi Pico 2 W | 板载 CYW43 经典蓝牙，DualSense / DualSense Edge，单手柄 |
+| `bluetooth-pico2w.uf2` | Raspberry Pi Pico 2 W（4 MiB Flash） | 板载 CYW43 经典蓝牙，DualSense / DualSense Edge，单手柄 |
+| `bluetooth-waveshare-rp2350b-plus-w.uf2` | Waveshare RP2350B-Plus-W（16 MiB Flash，RM2） | 板载经典蓝牙，DualSense / DualSense Edge，单手柄 |
 
-两版都经板卡原生 USB 向 PC 输出 DS5 + UAC1，保留 Lua、键鼠输出、WinUSB、UART 和设备 KV。
+三版都经板卡原生 USB 向 PC 输出 DS5 + UAC1，保留 Lua、键鼠输出、WinUSB、UART 和设备 KV。
 蓝牙版替换 USB Host，不能同时接 GPIO12/13 的 USB 输入；不支持 USB 蓝牙适配器。
 目前支持范围为 DualSense / DualSense Edge 的 BR/EDR HID 输入，不含 Xbox BLE、Switch 或通用蓝牙键鼠。
-PC 无需蓝牙；PC 连接的是 Pico 的 USB，手柄连接的是 Pico 2 W 板载蓝牙。
+PC 无需蓝牙；PC 连接的是 Pico 的 USB，手柄连接的是所选无线板的板载蓝牙。
 
 ## 配对与重连
 
-1. 按住 Pico 2 W 的 BOOTSEL 插入 PC，复制 `bluetooth-pico2w.uf2`。
+1. 按住所用无线板的 BOOTSEL 插入 PC，复制表格中对应的蓝牙 UF2。
+   **Pico 2 W 与 Waveshare 的无线引脚不同，不可混刷。Waveshare 特指 RP2350B-Plus-W，其他微雪板不在该固件支持范围。**
 2. 手柄先关机，按住 **PS + Create**，直到灯条快速闪烁进入配对模式。
-3. Pico 2 W 自动扫描并连接。板载绿色 LED 扫描时闪烁，HID 通道就绪时常亮。
+3. 无线板自动扫描并连接。板载绿色 LED 扫描时闪烁，HID 通道就绪时常亮。
 4. 使用默认 Lua 脚本，按键、摇杆、扳机、触摸、六轴经过 Lua 转发成 USB DS5 输入。
 5. 关机或断线后，按手柄 **PS** 重连。配对密钥保存在 Pico 的独立 Flash 分区，板卡断电后仍保留。
 
@@ -26,7 +28,7 @@ PC 无需蓝牙；PC 连接的是 Pico 的 USB，手柄连接的是 Pico 2 W 板
 没有配对成功或断开后会重复扫描，也可等待已配对手柄主动重连；连接后停止扫描，避免影响输入回报。
 同一时刻只接一只手柄；连接期间不接受第二只。
 
-两版的 BOOT 行为相同：**运行中按下再松开 BOOT**，默认开启 WinUSB，其他接口保持不变。
+三版的 BOOT 行为相同：**运行中按下再松开 BOOT**，默认开启 WinUSB，其他接口保持不变。
 在网页工作台手动授权后，可按设备已有的 WinUSB 自动重连规则找回设备。
 Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行决定启用哪些接口。
 
@@ -36,15 +38,29 @@ Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行�
 ## 构建与发布
 
 ```bash
-./build.sh                         # USB / Pico 2，build/src/pico-ds5-coventer.uf2
-./build.sh --bluetooth             # 蓝牙 / Pico 2 W，build-bluetooth/src/pico-ds5-coventer.uf2
-./build.sh --bluetooth --skip-setup # 已准备依赖时增量构建
+./build.sh                        # 默认 USB / Pico 2
+./build.sh --usb                  # 显式选择 USB / Pico 2，与不加参数相同
+./build.sh --pico2w               # 官方 Pico 2 W 蓝牙版
+./build.sh --waveshare            # Waveshare RP2350B-Plus-W 蓝牙版
+./build.sh --waveshare --skip-setup # 已准备依赖时增量构建
 ```
 
-两版默认使用不同目录，避免 CMake 的板卡缓存交叉污染。用 `--build-dir DIR` 可指定独立目录。
-直接使用 CMake 时需同时指定 `-DENABLE_DS5_BT=ON -DPICO_BOARD=pico2_w`。
-推送 `v*` tag 后，CI 两个矩阵任务分别构建，全部成功才发布同一版本的 Release，
-包含两套 UF2 / ELF / BIN 和统一 `SHA256SUMS`，任务产物也可在 Actions 页面下载。
+| 目标参数 | CMake 板型 | 默认构建目录 |
+|---|---|---|
+| 无参数 / `--usb` | `pico2` | `build` |
+| `--pico2w` | `pico2_w` | `build-bluetooth-pico2w` |
+| `--waveshare` | `waveshare_rp2350b_plus_w` | `build-bluetooth-waveshare` |
+
+也可使用 `--board usb` / `--board pico2w` / `--board waveshare`，同次命令只能选择一个目标。
+原 `--bluetooth` 已改为报错提示明确选择板型，避免误刷。已有 `build-bluetooth` 中的 Pico 2 W
+缓存仍可通过 `--pico2w --build-dir build-bluetooth` 复用。
+产物位于所选构建目录的 `src/pico-ds5-coventer.uf2`。各板型使用独立目录，复用其他板型的
+目录会报错。直接使用 CMake 时，蓝牙版需同时指定 `-DENABLE_DS5_BT=ON` 和表中的板型。
+Waveshare 板级头来自 mapper / DS5Dongle，并统一 CMake 与 C 宏的 Flash 容量为实际 16 MiB。
+
+推送 `v*` tag 后，CI 三个矩阵任务分别构建，全部成功才发布同一版本的 Release，
+包含三套明确标注输入方式和板卡的 UF2 / ELF / BIN，以及统一 `SHA256SUMS`。
+任务产物也可在 Actions 页面下载。
 
 ## 实现与存储
 
@@ -63,7 +79,11 @@ Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行�
   断线清理在 Lua 释放事件之后追加 DS5 断连帧，避免残留触点、六轴和按键。
 - 官方 Pico 2 W 为 4 MiB Flash：蓝牙双 bank 位于 `0x37e000..0x37ffff`（8 KiB），
   原有 Lua/AI KV 保持 `0x380000..0x3fffff`（512 KiB），二者互不覆盖。
-  两版均在链接期保留该 520 KiB 区域，检查固件不侵入持久化区，所有 Flash 写入沿用 SDK 双核安全锁出。
+  官方 Pico 2 / Pico 2 W 均在链接期保留该 520 KiB 区域，检查固件不侵入持久化区，所有 Flash 写入沿用 SDK 双核安全锁出。
+- Waveshare 使用实际 16 MiB Flash：蓝牙双 bank 为 `0xf7e000..0xf7ffff`，
+  Lua/AI KV 为 `0xf80000..0xffffff`；同样预留尾部 520 KiB，配对与配置互不覆盖。
+  两种板型的 KV 地址不同；本项目此前的 Pico 2 W 固件地址保持原样。mapper 自身的
+  固件与 KV 布局属于另一工程，不共用其 2 MiB 预算设置。
 
 参考 [pico-hid-mapper](https://github.com/RiderLty/pico-hid-mapper) 与
 [DS5Dongle](https://github.com/awalol/DS5Dongle)，协议初始化参考的 MIT 许可见
@@ -71,8 +91,8 @@ Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行�
 
 ## 验证范围
 
-已提供双版本固件构建与主机回归测试（`python3 tools/test_ds5_bt.py`），覆盖 CRC/触摸布局、
+已提供三版本固件构建与主机回归测试（`python3 tools/test_ds5_bt.py`），覆盖 CRC/触摸布局、
 异步通道打开、配对扫描、已绑定 PS 重连、发送重试、认证失败、断线释放和超时。
 测试通过真实 BTstack 事件格式驱动应用状态机，射频与 Flash 后端使用替身。
-**本次未连接实体 Pico 2 W / 手柄进行上板验证**，无线稳定性、不同手柄固件和高频输入
+**本次未连接实体 Pico 2 W / Waveshare / 手柄进行上板验证**，无线稳定性、不同手柄固件和高频输入
 仍需刷入后实测。震动、音频、灯条回传与自适应扳机不在本次支持范围。

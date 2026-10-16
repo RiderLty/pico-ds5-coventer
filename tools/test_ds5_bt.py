@@ -15,7 +15,9 @@ with tempfile.TemporaryDirectory(prefix='pico-ds5-bt-') as directory:
 #include <stdint.h>
 #include <stdbool.h>
 #define CYW43_WL_GPIO_LED_PIN 0
+#ifndef PICO_FLASH_SIZE_BYTES
 #define PICO_FLASH_SIZE_BYTES (4u * 1024u * 1024u)
+#endif
 typedef uint64_t absolute_time_t;
 absolute_time_t get_absolute_time(void);
 uint32_t to_ms_since_boot(absolute_time_t time);
@@ -46,7 +48,9 @@ void cyw43_arch_gpio_put(unsigned pin, bool value);
     for name, sources, extra in [
         ('report', [ROOT / 'tools/test_ds5_bt_report.c', ROOT / 'src/ds5_bt_report.c'],
          ['-I', str(ROOT / 'lib/hidkit/src'), '-I', str(ROOT / 'lib/hidkit/include')]),
-        ('lifecycle', [ROOT / 'tools/test_ds5_bt.c', ROOT / 'src/ds5_bt_report.c'], [])
+        ('lifecycle-pico2w', [ROOT / 'tools/test_ds5_bt.c', ROOT / 'src/ds5_bt_report.c'], []),
+        ('lifecycle-waveshare', [ROOT / 'tools/test_ds5_bt.c', ROOT / 'src/ds5_bt_report.c'],
+         ['-DPICO_FLASH_SIZE_BYTES=16777216'])
     ]:
         executable = tmp / name
         subprocess.run(common + extra + list(map(str, sources)) + ['-o', str(executable)], check=True)

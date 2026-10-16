@@ -20,7 +20,9 @@ awalol/DS5Dongle（UAC1 音频接口 0-2 + DS5 接口 3）。
 ```bash
 ./build.sh                             # 准备固定依赖 + Release 构建
 ./build.sh --skip-setup                 # 已有依赖时离线增量构建
-./build.sh --bluetooth                  # Pico 2 W 蓝牙输入，见 docs/bluetooth.md
+./build.sh --usb                        # 显式默认 USB 版
+./build.sh --pico2w                     # 官方 Pico 2 W 蓝牙输入
+./build.sh --waveshare                  # 微雪 RP2350B-Plus-W 蓝牙输入，见 docs/bluetooth.md
 # 产物：build/src/pico-ds5-coventer.uf2
 ```
 
@@ -57,7 +59,7 @@ python3 tools/serve_https.py           # 自签 HTTPS（WebHID/Web Serial 需要
 ## 架构
 
 蓝牙变体 `ENABLE_DS5_BT=1` 用 core1 轮询 CYW43/BTstack 替换 Host；不编译 PIO-USB / XInput / Switch Pro。
-配对分区固定在原有 KV 之前的 8 KiB，不能使用 SDK 默认 Flash 尾部地址（会覆盖 Lua/AI KV）。
+官方 Pico 2 W 4 MiB / 微雪 RP2350B-Plus-W 16 MiB Flash，配对分区固定在各板型尾部 KV 之前的 8 KiB，不能使用 SDK 默认 Flash 尾部地址（会覆盖 Lua/AI KV）。
 实现与验证范围见 `docs/bluetooth.md`。
 
 ### 双核分工（关键约束：`tud_*` 只在 core0 调用）

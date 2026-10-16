@@ -327,7 +327,9 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
         int n = snprintf(info, sizeof info,
                          "pico-ds5-coventer\n"
                          "transport: %s\n"
-#if ENABLE_DS5_BT
+#if ENABLE_DS5_BT && defined(WAVESHARE_RP2350B_PLUS_W)
+                         "input: bluetooth (Waveshare RP2350B-Plus-W, DualSense/Edge)\n"
+#elif ENABLE_DS5_BT
                          "input: bluetooth (Pico 2 W, DualSense/Edge)\n"
 #else
                          "input: usb (PIO-USB GPIO12/13)\n"

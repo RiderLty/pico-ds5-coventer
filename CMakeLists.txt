@@ -1,10 +1,14 @@
 cmake_minimum_required(VERSION 3.13)
-option(ENABLE_DS5_BT "DualSense Bluetooth input on Pico 2 W (replaces PIO USB host)" OFF)
+option(ENABLE_DS5_BT "DualSense Bluetooth input on Pico 2 W / Waveshare RP2350B-Plus-W" OFF)
 if(ENABLE_DS5_BT)
     set(PICO_BOARD pico2_w CACHE STRING "Board type")
 else()
     set(PICO_BOARD pico2 CACHE STRING "Board type")
 endif()
+
+# The Waveshare RP2350B + RM2 wireless board is not bundled with this SDK.
+# Register its header before the SDK import parses the selected board.
+list(APPEND PICO_BOARD_HEADER_DIRS "${CMAKE_CURRENT_LIST_DIR}/boards/headers")
 
 # 使用项目内置的 SDK 副本（与 DS5Dongle CI 环境一致：pico-sdk 2.3.0 +
 # tinyusb@2d56dc53），不依赖环境变量。在 pico_sdk_import.cmake 之前设置。
@@ -31,8 +35,12 @@ if(Git_FOUND)
     endif()
 endif()
 
-if(ENABLE_DS5_BT AND NOT PICO_BOARD STREQUAL "pico2_w")
-    message(FATAL_ERROR "Bluetooth variant requires PICO_BOARD=pico2_w")
+if(ENABLE_DS5_BT)
+    if(NOT PICO_BOARD STREQUAL "pico2_w" AND NOT PICO_BOARD STREQUAL "waveshare_rp2350b_plus_w")
+        message(FATAL_ERROR "Bluetooth requires pico2_w or waveshare_rp2350b_plus_w")
+    endif()
+elseif(NOT PICO_BOARD STREQUAL "pico2")
+    message(FATAL_ERROR "USB variant requires pico2; use build.sh --usb / --pico2w / --waveshare")
 endif()
 
 if(NOT ENABLE_DS5_BT)
