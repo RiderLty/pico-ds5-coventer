@@ -61,6 +61,8 @@ jobs:
       - name: Test Bluetooth report and lifecycle handling
         if: startsWith(matrix.variant, 'bluetooth-')
         run: python3 tools/test_ds5_bt.py
+      - name: Test Lua lifecycle and touch callbacks
+        run: python3 tools/test_lua_scripts.py
       - name: Test WinUSB short replies
         run: python3 tools/test_usb_io.py
       - name: Prepare release assets

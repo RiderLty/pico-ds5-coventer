@@ -15,7 +15,6 @@
 
 #include "lua_binder.h"
 #include "lua_core.h"
-#include "hidkit.h"        // HIDKIT_TOUCHPAD_SLOTS（触摸板快照槽位数）
 #include "pico/time.h"     // time_us_64（tick 的 dt 计时）
 #include <lua.h>
 #include <lauxlib.h>
@@ -45,8 +44,9 @@ static bool     g_tick_primed  = false;
 // VM 重建时清零 → 新 VM 一定会收到当前状态的第一帧。
 static uint32_t s_tp_last_meta;
 static uint32_t s_tp_last_dims;
-static uint16_t s_tp_last_x[HIDKIT_TOUCHPAD_SLOTS];
-static uint16_t s_tp_last_y[HIDKIT_TOUCHPAD_SLOTS];
+enum { LUA_TOUCHPAD_SLOTS = 2 }; // DS5 的两个触点
+static uint16_t s_tp_last_x[LUA_TOUCHPAD_SLOTS];
+static uint16_t s_tp_last_y[LUA_TOUCHPAD_SLOTS];
 
 //--------------------------------------------------------------------+
 // 外部 rebind 回调（默认空实现，应用层覆盖 —— 本工程实现在 input_app.c）
@@ -188,7 +188,8 @@ void lua_binder_on_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
     (void)lua_core_pcall_id(g_lid_on_motion, 6, 0);
 }
 
-// 触摸板快照：瞬时量直投 on_touchpad(meta, dims, x0,y0, ..., x9,y9)。
+// 触摸板快照：只向 Lua 传 DS5 的两个触点，共六个参数。
+// on_touchpad(meta, dims, x0, y0, x1, y1)
 // 内置节流：与上次已分发的快照逐字节相同时不调用——静止手指的定频报文
 // 洪峰在此挡掉。脚本未定义回调时只有一次整数比较。
 void lua_binder_on_touchpad(uint32_t meta, uint32_t dims,
@@ -197,6 +198,9 @@ void lua_binder_on_touchpad(uint32_t meta, uint32_t dims,
     if (meta == s_tp_last_meta && dims == s_tp_last_dims &&
         memcmp(x, s_tp_last_x, sizeof(s_tp_last_x)) == 0 &&
         memcmp(y, s_tp_last_y, sizeof(s_tp_last_y)) == 0) return;
+    // Reserve six arguments plus the registry function before any pushes, so
+    // allocation failure leaves the stack untouched and permits a later retry.
+    if (!lua_core_checkstack(3 + 2 * LUA_TOUCHPAD_SLOTS)) return;
     s_tp_last_meta = meta;
     s_tp_last_dims = dims;
     memcpy(s_tp_last_x, x, sizeof(s_tp_last_x));
@@ -204,11 +208,11 @@ void lua_binder_on_touchpad(uint32_t meta, uint32_t dims,
 
     lua_core_push_int((int)meta);
     lua_core_push_int((int)dims);
-    for (int i = 0; i < HIDKIT_TOUCHPAD_SLOTS; i++) {
+    for (int i = 0; i < LUA_TOUCHPAD_SLOTS; i++) {
         lua_core_push_int(x[i]);
         lua_core_push_int(y[i]);
     }
-    (void)lua_core_pcall_id(g_lid_on_touchpad, 2 + 2 * HIDKIT_TOUCHPAD_SLOTS, 0);
+    (void)lua_core_pcall_id(g_lid_on_touchpad, 2 + 2 * LUA_TOUCHPAD_SLOTS, 0);
 }
 
 void lua_binder_on_dropped(int8_t slot, uint16_t vid, uint16_t pid) {

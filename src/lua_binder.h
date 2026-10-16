@@ -61,7 +61,7 @@ void lua_binder_on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 void lua_binder_on_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                           int16_t ax, int16_t ay, int16_t az);
 
-// 触摸板快照 on_touchpad(meta, dims, x0,y0, ..., x9,y9)，内置逐字节去重
+// 触摸板快照 on_touchpad(meta, dims, x0, y0, x1, y1)，仅前两点坐标参与去重
 void lua_binder_on_touchpad(uint32_t meta, uint32_t dims,
                             const uint16_t *x, const uint16_t *y);
 

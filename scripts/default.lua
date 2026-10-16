@@ -25,9 +25,9 @@
 --   on_gamepad_abs(lsx, lsy, rsx, rsy, lt, rt)
 --                                         手柄轴 / 扳机（轴 ±32767，扳机 0..32767）
 --   on_motion(gx, gy, gz, ax, ay, az)     六轴（±32767 = 陀螺 ±2000dps / 加速度 ±4g）
---   on_touchpad(meta, dims, x0, y0, ...)  触摸板快照，最多 10 触点：
---                                         meta 的 bit0..9 = 该触点在位，
---                                         dims = 宽 | (高 << 16)，其后是 10 组 x,y
+--   on_touchpad(meta, dims, x0, y0, x1, y1)  DS5 触摸板快照，共 2 个触点：
+--                                         meta 的 bit0/bit1 = 对应触点在位，
+--                                         dims = 宽 | (高 << 16)
 --   on_boot_button(pressed)               板载 BOOTSEL 按键（设备侧 10ms 消抖）
 --   on_dropped(slot, vid, pid)            槽位耗尽丢弃设备时的一次性通知
 --   tick(dt_us)                           周期回调（dt = 距上次的微秒差，首个为 0）
@@ -118,10 +118,8 @@ function on_motion(gx, gy, gz, ax, ay, az)
 end
 
 -- ── 触摸板 → DS5（2 触点直通）──────────────────────────────────────
--- meta bit0..9 = 触点在位；dims = 宽 | (高 << 16)
--- 取前 2 个在位触点的坐标；无触点时发全零
-function on_touchpad(meta, dims, x0, y0, x1, y1, x2, y2, x3, y3, x4, y4,
-                     x5, y5, x6, y6, x7, y7, x8, y8, x9, y9)
+-- meta bit0/bit1 = 对应触点在位；dims = 宽 | (高 << 16)
+function on_touchpad(meta, dims, x0, y0, x1, y1)
     local t0 = (meta & 0x01) ~= 0
     local t1 = (meta & 0x02) ~= 0
     pad_touch(x0, y0, x1, y1, t0, t1)

@@ -116,7 +116,7 @@ hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个�
 | `on_gamepad_btn(code, pressed)` | 手柄按键（hidkit BTN_* 0..31） |
 | `on_gamepad_abs(lsx, lsy, rsx, rsy, lt, rt)` | 手柄轴（±32767）/扳机（0..32767） |
 | `on_motion(gx, gy, gz, ax, ay, az)` | 六轴（陀螺 ±2000dps / 加速度 ±4g，归一化 ±32767） |
-| `on_touchpad(meta, dims, x0, y0, ..., x9, y9)` | 触摸板快照（10 槽位，meta bit0-9 触点在位） |
+| `on_touchpad(meta, dims, x0, y0, x1, y1)` | DS5 触摸板快照（2 个触点，meta bit0/bit1 触点在位） |
 | `on_boot_button(pressed)` | 板载 BOOTSEL 按键（按下 true / 抬起 false，设备侧消抖）；返回 true 拦截默认行为，否则释放时开启 WinUSB，键盘和鼠标保持不变 |
 | `on_dropped(slot, vid, pid)` | 设备被丢弃通知 |
 | `tick(dt_us)` | 周期回调（dt = 距上次微秒差） |

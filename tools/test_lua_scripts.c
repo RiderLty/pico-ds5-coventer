@@ -132,6 +132,24 @@ int main(void) {
     assert(lua_store_init() && flash_devices==1); // repeated init retains the live store
     assert(lua_binder_is_ready() && s_image==s_default_image && !s_saved && s_dirty && !s_error[0]);
     unsigned initial_programs=programs, initial_erases=erases;
+    // USB and Bluetooth expose only the two DS5 touch points (six arguments),
+    // including immediately after VM replacement and garbage collection.
+    for (unsigned reload=0; reload<3; ++reload) {
+        run("touch_calls=0; function on_touchpad(...) touch_calls=touch_calls+1; touch_args=table.pack(...) end");
+        uint16_t x[10], y[10];
+        for (unsigned i=0; i<10; ++i) { x[i]=100+i; y[i]=200+i; }
+        lua_binder_on_touchpad(3, 1920u|(1080u<<16), x, y);
+        assert(lua_core_dostring("assert(touch_calls==1 and touch_args.n==6 and touch_args[1]==3 and touch_args[2]==(1920|(1080<<16))); for i=0,1 do assert(touch_args[3+2*i]==100+i and touch_args[4+2*i]==200+i) end; collectgarbage('collect')"));
+        x[2]++; y[9]++; // Unexposed coordinates must not trigger a callback.
+        lua_binder_on_touchpad(3, 1920u|(1080u<<16), x, y);
+        assert(lua_core_dostring("assert(touch_calls==1)"));
+        y[1]++;
+        lua_binder_on_touchpad(3, 1920u|(1080u<<16), x, y);
+        assert(lua_core_dostring("assert(touch_calls==2 and touch_args.n==6 and touch_args[6]==202)"));
+        lua_binder_on_touchpad(0, 1920u|(1080u<<16), x, y);
+        assert(lua_core_dostring("assert(touch_calls==3 and touch_args.n==6 and touch_args[1]==0)"));
+    }
+    assert(!op(6)); // restore default before the remaining lifecycle tests
     const char good[]="function on_key(k,d) seen=k end; function on_boot_button(p) boot=p; boots=(boots or 0)+1; return p end; marker=42";
     upload(good,strlen(good));
     assert(s_image==s_default_image && programs==initial_programs);
@@ -271,5 +289,5 @@ int main(void) {
     lua_binder_deinit();discard_upload();free(s_owned);
     lua_store_deinit();
     assert(flash_devices==0);
-    puts("PASS: real Lua/KV RAM-only run, explicit save/reload/delete, boot/default fallback, watchdog, 60KiB, GC, interrupted writes, CRC, sessions, first-enumeration capabilities and runtime reload");
+    puts("PASS: real Lua/KV RAM-only run, explicit save/reload/delete, boot/default fallback, watchdog, 60KiB, GC, interrupted writes, CRC, sessions, first-enumeration capabilities, runtime reload and six-argument touch callbacks with Lua API checks");
 }

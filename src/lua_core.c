@@ -218,6 +218,10 @@ void lua_core_unref(int id) {
 // C → Lua: push 参数（零分配栈操作）
 //--------------------------------------------------------------------+
 
+bool lua_core_checkstack(int extra) {
+    return g_L && extra >= 0 && lua_checkstack(g_L, extra);
+}
+
 bool lua_core_push_int(int64_t v) {
     if (!g_L) return false;
     lua_pushinteger(g_L, v);

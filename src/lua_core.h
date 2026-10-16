@@ -35,6 +35,8 @@ bool lua_core_register_in(const char *table, const char *name, void *func);
 bool lua_core_table_int(const char *table, const char *key, int64_t v);
 
 // C → Lua: push 参数（零分配栈操作）
+// Reserve argument slots plus the function before pushing callback arguments.
+bool lua_core_checkstack(int extra);
 bool lua_core_push_int(int64_t v);
 bool lua_core_push_bool(bool v);
 bool lua_core_push_str(const char *s, size_t len);
