@@ -23,9 +23,17 @@
 #include "tusb.h"
 
 #include "hidkit.h"
+#if !ENABLE_DS5_BT
 #include "hidkit_xinput_glue.h"
 #include "switch_pro.h"
 #include "hidkit_switch_pro_glue.h"
+#endif
+
+#if ENABLE_DS5_BT
+#define INPUT_DEVICE_MAX 1
+#else
+#define INPUT_DEVICE_MAX CFG_TUH_HID
+#endif
 
 #include "debug.h"
 #include "input_app.h"
@@ -39,7 +47,7 @@
 #include "mouse_queue.h"
 
 // instance → hidkit 槽位；-1 = hidkit 未接管该接口
-static int8_t s_slot[CFG_TUH_HID];
+static int8_t s_slot[INPUT_DEVICE_MAX];
 
 // 设备登记表（hidkit.info() 的数据源；instance 为 TinyUSB 全局接口下标）
 typedef struct {
@@ -47,7 +55,7 @@ typedef struct {
     uint8_t  dev_addr, itf, proto;
     int8_t   slot;
 } dev_reg_t;
-static dev_reg_t s_dev[CFG_TUH_HID];
+static dev_reg_t s_dev[INPUT_DEVICE_MAX];
 
 /*--------------------------------------------------------------------+
  * pad.* Lua 输出：手柄/触摸/六轴 → input_queue → core0 ds5_pad
@@ -167,14 +175,15 @@ void hidkit_DEBUG(const char *fmt, ...)
 
 void input_app_init(void)
 {
-    for (uint8_t i = 0; i < CFG_TUH_HID; i++) s_slot[i] = -1;
+    for (uint8_t i = 0; i < INPUT_DEVICE_MAX; i++) s_slot[i] = -1;
     hidkit_init();
 }
 
+#if !ENABLE_DS5_BT
 void input_app_mount(uint8_t dev_addr, uint8_t instance, uint8_t itf_num,
                      uint8_t itf_proto, uint8_t const *desc_report, uint16_t desc_len)
 {
-    if (instance >= CFG_TUH_HID) return;
+    if (instance >= INPUT_DEVICE_MAX) return;
     s_slot[instance] = -1;
 
     uint16_t vid = 0, pid = 0;
@@ -212,25 +221,40 @@ void input_app_mount(uint8_t dev_addr, uint8_t instance, uint8_t itf_num,
                  (int)slot);
 }
 
+#else
+// Both models use the Edge-compatible superset (extra buttons are zero on DS5).
+// VID/PID here describe the decoder profile, not a discovered USB identity.
+void input_app_bt_mount(void)
+{
+    input_app_umount(0);
+    hidkit_dev_info_t info = {
+        .vid = 0x054c, .pid = 0x0df2, .dev_addr = 1,
+        .proto = HIDKIT_PROTO_GAMEPAD,
+    };
+    s_slot[0] = hidkit_mount(&info);
+    s_dev[0] = (dev_reg_t){info.vid, info.pid, 1, 0, info.proto, s_slot[0]};
+    DEBUG("[DS5C][BT] DualSense-compatible input slot=%d\n", s_slot[0]);
+}
+#endif
+
 void input_app_umount(uint8_t instance)
 {
-    if (instance >= CFG_TUH_HID) return;
+    if (instance >= INPUT_DEVICE_MAX) return;
     memset(&s_dev[instance], 0, sizeof(s_dev[instance]));
 
     int8_t const slot = s_slot[instance];
     if (slot >= 0) {
-        if (hidkit_is_gamepad(slot)) {
-            pad_send_disconnect();   // 通知 core0 手柄断连
-        }
+        bool gamepad = hidkit_is_gamepad(slot);
         // 库内先补发该槽位仍按着的键/鼠标键"松开"、手柄轴归零
         hidkit_umount(slot);
+        if (gamepad) pad_send_disconnect();
         s_slot[instance] = -1;
     }
 }
 
 bool input_app_report(uint8_t instance, uint8_t const *report, uint16_t len)
 {
-    if (instance >= CFG_TUH_HID) return false;
+    if (instance >= INPUT_DEVICE_MAX) return false;
     int8_t const slot = s_slot[instance];
     if (slot < 0) return false;
 
@@ -241,7 +265,9 @@ bool input_app_report(uint8_t instance, uint8_t const *report, uint16_t len)
 void input_app_task(void)
 {
     // Switch Pro 握手状态机：非阻塞时间步进；发送/超时重试都在这里推进
+#if !ENABLE_DS5_BT
     switch_pro_task();
+#endif
 }
 
 /*--------------------------------------------------------------------+
@@ -296,7 +322,7 @@ static int _lcb_hidkit_info(lua_State *L) {
     (void)L;
     static const char *proto_str[] = { "None", "Keyboard", "Mouse", "Gamepad" };
     uint8_t count = 0;
-    for (uint8_t i = 0; i < CFG_TUH_HID; i++) {
+    for (uint8_t i = 0; i < INPUT_DEVICE_MAX; i++) {
         if (s_dev[i].dev_addr == 0) continue;
         DEBUG("[lua] [%02d] %04x:%04x addr=%u itf=%u proto=%s slot=%d\n",
                      i, s_dev[i].vid, s_dev[i].pid, s_dev[i].dev_addr,
@@ -640,6 +666,11 @@ void lua_binder_rebind(void) {
     lua_core_table_int("hidkit", "DPAD_DOWN",  BTN_DPAD_DOWN);
     lua_core_table_int("hidkit", "DPAD_LEFT",  BTN_DPAD_LEFT);
     lua_core_table_int("hidkit", "DPAD_RIGHT", BTN_DPAD_RIGHT);
+    lua_core_table_int("hidkit", "BTN_EXTRA_1", BTN_EXTRA_1);
+    lua_core_table_int("hidkit", "BTN_EXTRA_2", BTN_EXTRA_2);
+    lua_core_table_int("hidkit", "BTN_EXTRA_3", BTN_EXTRA_3);
+    lua_core_table_int("hidkit", "BTN_EXTRA_4", BTN_EXTRA_4);
+    lua_core_table_int("hidkit", "BTN_EXTRA_5", BTN_EXTRA_5);
     lua_core_table_int("hidkit", "GYRO_FULL_SCALE_DPS", HIDKIT_MOTION_GYRO_FULL_SCALE_DPS);
     lua_core_table_int("hidkit", "ACCEL_FULL_SCALE_MG", HIDKIT_MOTION_ACCEL_FULL_SCALE_MG);
 }
@@ -648,6 +679,7 @@ void lua_binder_rebind(void) {
  * Switch Pro 握手库移植层 + 校准交付（全部回调在 core1）
  *--------------------------------------------------------------------*/
 
+#if !ENABLE_DS5_BT
 uint32_t switch_pro_time_us(void)
 {
     return time_us_32();
@@ -675,7 +707,7 @@ void switch_pro_calibration(uint8_t dev_addr, uint8_t instance,
                             const switch_pro_calib_t *cal)
 {
     (void)dev_addr;
-    if (instance >= CFG_TUH_HID) return;
+    if (instance >= INPUT_DEVICE_MAX) return;
     int8_t const slot = s_slot[instance];
     if (slot < 0) return;   // hidkit 尚未接管（罕见：校准先于挂载完成）
 
@@ -696,3 +728,5 @@ usbh_class_driver_t const *usbh_app_driver_get_cb(uint8_t *driver_count)
     *driver_count = 1;
     return hidkit_tusb_xinput_driver();
 }
+
+#endif // !ENABLE_DS5_BT

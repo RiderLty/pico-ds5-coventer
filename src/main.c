@@ -14,7 +14,12 @@
 #include "pico/multicore.h"
 #include "pico/flash.h"
 
+#if ENABLE_DS5_BT
+#include "ds5_bt.h"
+#else
 #include "pio_usb.h"
+#include "switch_pro.h"
+#endif
 #include "tusb.h"
 
 #include "debug.h"
@@ -22,7 +27,6 @@
 #include "input_queue.h"
 #include "input_app.h"
 #include "ds5_pad.h"
-#include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
 #include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（Lua 请求热重载）
 #include "usb_io.h"       // custom IO 通讯接口 echo（dev_enable 第三参动态开关）
 #include "uart_proto.h"   // UART 传输适配器（DMA RX + SLIP 协议帧）
@@ -60,6 +64,8 @@ void core1_main(void) {
   flash_safe_execute_core_init();
   sleep_ms(10);
 
+
+#if !ENABLE_DS5_BT
   // 通过 tuh_configure() 将 PIO 配置传递给 Host 栈
   // 注意: tuh_configure() 必须在 tuh_init() 之前调用
   pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
@@ -69,6 +75,8 @@ void core1_main(void) {
   // Report 协议而非 Boot 协议：hidkit 按报告描述符解析，
   // 才能拿到完整按键数/NKRO/手柄布局等扩展字段
   tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
+
+#endif
 
   // hidkit 槽位表清空（须在 tusb_init 之前）
   input_app_init();
@@ -84,16 +92,26 @@ void core1_main(void) {
 
   // Device 就绪后才启动 Host / Lua tick，避免输入回调在首枚举配置提交前
   // 改写启动脚本的目标。之后的 dev_enable 仍按运行期热重载处理。
+
+#if ENABLE_DS5_BT
+  ds5_bt_init(); // core1 polling; Device is already available even if radio fails
+#else
   tusb_rhport_init_t host_init = {
     .role  = TUSB_ROLE_HOST,
     .speed = TUSB_SPEED_FULL
   };
   tusb_init(1, &host_init);
 
-  DEBUG("[DS5C] core1 host ready\n");
+#endif
+
+  DEBUG("[DS5C] core1 input ready (bluetooth=%d)\n", ENABLE_DS5_BT);
 
   while (true) {
+#if ENABLE_DS5_BT
+    ds5_bt_task();
+#else
     tuh_task();
+#endif
     input_app_task();   // Switch Pro 握手状态机（须与 tuh 回调同核同循环）
     lua_script_process();
     boot_button_process();  // 板载 BOOTSEL 事件（core0 消抖后经跨核队列送来）
@@ -151,8 +169,8 @@ int main(void) {
   tusb_init(0, &dev_init);
   __atomic_store_n(&s_startup_phase, STARTUP_DEVICE_READY, __ATOMIC_RELEASE);
 
-  DEBUG("[DS5C] core0 device ready (PIO-USB @ GPIO12/13, tusb_debug=%d)\n",
-               CFG_TUSB_DEBUG);
+  DEBUG("[DS5C] core0 device ready (bluetooth=%d, tusb_debug=%d)\n",
+               ENABLE_DS5_BT, CFG_TUSB_DEBUG);
 
   uint8_t report[DS_REPORT_LEN];
   while (true) {
@@ -213,6 +231,7 @@ void tud_resume_cb(void)
 // Switch Pro 手柄需主机握手才会开始上报（模块内部自判 vid/pid）
 // 注意: 如果报告描述符长度 > CFG_TUH_ENUMERATION_BUFSIZE，desc_report 为 NULL，
 // hidkit 无法解析该设备（保持未接管，报文走未消费路径丢弃）
+#if !ENABLE_DS5_BT
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance,
                       uint8_t const* desc_report, uint16_t desc_len)
 {
@@ -265,3 +284,5 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance,
     DEBUG("[DS5C][HID] cannot request report\n");
   }
 }
+
+#endif // !ENABLE_DS5_BT

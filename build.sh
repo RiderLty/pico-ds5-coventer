@@ -6,9 +6,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() {
     cat <<'EOF'
-用法：./build.sh [--skip-setup] [--build-dir DIR] [-- CMake 参数...]
+用法：./build.sh [--bluetooth] [--skip-setup] [--build-dir DIR] [-- CMake 参数...]
 
 默认初始化固定版本的依赖、应用 PIO-USB 补丁，并编译 Pico 2 Release 固件。
+  --bluetooth      Pico 2 W 板载蓝牙输入，默认目录 build-bluetooth
   --skip-setup     跳过依赖准备（已有依赖、离线或增量构建时使用）
   --build-dir DIR  构建目录，默认 build
   -h, --help      显示帮助
@@ -19,10 +20,15 @@ usage() {
 EOF
 }
 
-BUILD_DIR=build
+BUILD_DIR=
+BLUETOOTH=OFF
 SKIP_SETUP=0
 while (($#)); do
     case "$1" in
+        --bluetooth)
+            BLUETOOTH=ON
+            shift
+            ;;
         --skip-setup)
             SKIP_SETUP=1
             shift
@@ -50,6 +56,21 @@ while (($#)); do
     esac
 done
 
+BOARD=pico2
+if [[ "$BLUETOOTH" == ON ]]; then
+    BOARD=pico2_w
+    BUILD_DIR="${BUILD_DIR:-build-bluetooth}"
+else
+    BUILD_DIR="${BUILD_DIR:-build}"
+fi
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    cached_board=$(sed -n 's/^PICO_BOARD:STRING=//p' "$BUILD_DIR/CMakeCache.txt")
+    if [[ -n "$cached_board" && "$cached_board" != "$BOARD" ]]; then
+        echo "错误：$BUILD_DIR 已用于 ${cached_board}；请使用独立 --build-dir" >&2
+        exit 2
+    fi
+fi
+
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 TUSB_DEBUG_LEVEL="${TUSB_DEBUG_LEVEL:-0}"
@@ -76,7 +97,8 @@ fi
 
 # 每次明确传入默认值，避免上次调试构建的 CMake 缓存影响发布固件。
 cmake -S . -B "$BUILD_DIR" \
-    -DPICO_BOARD=pico2 \
+    -DPICO_BOARD="$BOARD" \
+    -DENABLE_DS5_BT="$BLUETOOTH" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DTUSB_DEBUG_LEVEL="$TUSB_DEBUG_LEVEL" \
     -DDEBUG_BAUDRATE="$DEBUG_BAUDRATE" \

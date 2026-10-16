@@ -23,8 +23,13 @@
 #define CFG_TUD_ENABLED     1
 
 // Enable host stack with pio-usb if Pico-PIO-USB library is available
+#if ENABLE_DS5_BT
+#define CFG_TUH_ENABLED     0
+#define CFG_TUH_RPI_PIO_USB 0
+#else
 #define CFG_TUH_ENABLED     1
 #define CFG_TUH_RPI_PIO_USB 1
+#endif
 
 /* USB DMA on some MCUs can only access a specific SRAM region with restriction on alignment.
  * Tinyusb use follows macros to declare transferring memory so that they can be put

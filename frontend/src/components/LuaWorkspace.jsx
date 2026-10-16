@@ -613,6 +613,10 @@ export default function LuaWorkspace() {
                 </StatusPill>
             </Stack>
             <Stack direction="row" spacing={0.75} alignItems="center" sx={{ flexShrink: 0 }}>
+                <Button component="a" href="https://github.com/RiderLty/pico-ds5-coventer/releases/latest"
+                    target="_blank" rel="noopener noreferrer" title="下载 USB / Pico 2 或蓝牙 / Pico 2 W 固件">固件下载</Button>
+                <Button component="a" href="https://github.com/RiderLty/pico-ds5-coventer/blob/main/docs/bluetooth.md"
+                    target="_blank" rel="noopener noreferrer">蓝牙说明</Button>
                 <Button size="small" variant={aiOpen ? 'contained' : 'outlined'} disableElevation
                     disabled={!aiReady} onClick={toggleAi} sx={{ textTransform: 'none' }}>
                     AI 助手{aiRunning ? ' · 工作中' : unread ? ' · 新回复' : ''}

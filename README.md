@@ -1,6 +1,8 @@
 # pico-ds5-coventer
 
-USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (RP2350)。
+USB / 蓝牙输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 / Pico 2 W (RP2350)。
+
+[网页工作台](https://riderlty.github.io/pico-ds5-coventer/) · [下载 USB / 蓝牙固件](https://github.com/RiderLty/pico-ds5-coventer/releases/latest) · [蓝牙配对与构建说明](docs/bluetooth.md)
 输入侧由 [hidkit](https://github.com/RiderLty/hidkit) 解析键盘、鼠标、HID 手柄，
 另接 XInput 类驱动与 Switch Pro USB 握手库；设备端采用
 [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) 的 DS5/UAC1 描述符。
@@ -24,10 +26,14 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
 
 ## 功能与默认行为
 
-- 手柄状态经 C 管线直通 DS5：双摇杆、模拟扳机、十字键和数字按键；拔出后回到空闲态。
+- 可选蓝牙变体：`./build.sh --bluetooth`，使用 Pico 2 W 板载经典蓝牙连接 DualSense / Edge，
+  替换 PIO-USB Host。PS + Create 首次配对，PS 重连；密钥与 Lua/AI KV 分区隔离。
+  详见 [蓝牙说明与验证范围](docs/bluetooth.md)。
+
+- 手柄状态经 hidkit → Lua → DS5：双摇杆、模拟扳机、十字键和数字按键；拔出后回到空闲态。
   XInput 支持 Xbox 360/One/Series 有线输入，Switch Pro 经 USB 握手与 SPI 校准读取。
 - 键鼠输入经 Lua 转发到宿主键鼠接口。C 侧固定 FPS 键鼠→手柄映射已移除，
-  Lua 回调是事件通知；除 `on_boot_button` 外返回值不拦截或改变 C 手柄直通路径。
+  Lua 回调负责映射，输出需调用 `pad_*`；除 `on_boot_button` 外回调返回值均忽略。
 - 使用默认脚本上电时，额外接口均关闭，配置为 DS5 + UAC1 音频（227 字节、4 个接口）。
   默认 `scripts/default.lua` 已将 5 秒后自动启用接口的逻辑整段注释保留，不会自动追加键鼠或 WinUSB。
   该示例原本累计脚本 tick 时间约 5 秒后调用 `dev_enable(1, 1, 1)`，同时启用三个接口；
@@ -160,6 +166,10 @@ hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个�
 ./build.sh
 # 产物：build/src/pico-ds5-coventer.uf2
 
+# Pico 2 W 蓝牙输入版
+./build.sh --bluetooth
+# 产物：build-bluetooth/src/pico-ds5-coventer.uf2
+
 # 已准备好依赖时跳过 setup（支持离线增量编译）
 ./build.sh --skip-setup
 ```
@@ -177,8 +187,9 @@ Host 引脚在 `src/main.c` 的 `pio_cfg.pin_dp` 设置。
 ### 自动发布
 
 推送 `v*` tag 到 GitHub 后，`.github/workflows/release.yml` 调用同一个 `build.sh`
-编译 Pico 2 Release 固件，创建对应 tag 的 GitHub Release 并自动生成发布说明。
-附件包含带版本号的 `.uf2`、`.elf`、`.bin` 和 `SHA256SUMS`。
+分别编译 USB / Pico 2 和蓝牙 / Pico 2 W Release 固件；两个任务都成功后创建对应 tag 的
+GitHub Release 并自动生成发布说明。附件包含带版本号与 `usb-pico2` / `bluetooth-pico2w`
+后缀的两套 `.uf2`、`.elf`、`.bin` 和统一 `SHA256SUMS`。
 
 ```bash
 git tag v1.0.0

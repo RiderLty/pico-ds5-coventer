@@ -22,8 +22,6 @@ target_sources(${target_name} PRIVATE
  lua_binder.c
  lua_store.c
  lua_script.c
- ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
- ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
  )
 
 # ── 预制 Lua 脚本自动嵌入（防脚本/固件不同步）────────────────────────────
@@ -81,24 +79,39 @@ target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 target_link_libraries(${target_name} PRIVATE
  pico_stdlib
- pico_pio_usb
  tinyusb_device
- tinyusb_host
  pico_time
  pico_unique_id
  hardware_uart
  hardware_gpio
  hidkit
- hidkit_tusb_xinput
- hidkit_tusb_switch_pro
  lua
  kvstore
 )
 
+if(ENABLE_DS5_BT)
+  target_sources(${target_name} PRIVATE ds5_bt.c ds5_bt_report.c)
+  target_compile_definitions(${target_name} PRIVATE
+    ENABLE_DS5_BT=1 CYW43_LWIP=0
+    PICO_FLASH_BANK_TOTAL_SIZE=8192
+    pico_flash_bank_get_storage_offset_func=ds5_bt_flash_storage_offset)
+  target_link_libraries(${target_name} PRIVATE
+    pico_cyw43_arch_poll pico_btstack_cyw43 pico_btstack_classic pico_btstack_flash_bank)
+  set(STORAGE_RESERVE_BYTES 532480) # BT banks (8 KiB) before existing KV (512 KiB)
+else()
+  target_compile_definitions(${target_name} PRIVATE ENABLE_DS5_BT=0)
+  target_sources(${target_name} PRIVATE
+    ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
+    ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c)
+  target_link_libraries(${target_name} PRIVATE
+    pico_pio_usb tinyusb_host hidkit_tusb_xinput hidkit_tusb_switch_pro)
+  set(STORAGE_RESERVE_BYTES 532480) # Also preserve pairing banks when switching variants
+endif()
+
 # Tail 512 KiB belongs exclusively to KV. Fail the link before firmware can
 # overlap it, while retaining the board's actual PICO_FLASH_SIZE_BYTES.
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld
-  "ASSERT(__flash_binary_end <= ORIGIN(FLASH) + LENGTH(FLASH) - 524288, \"firmware overlaps tail KV partition\")\n")
+  "ASSERT(__flash_binary_end <= ORIGIN(FLASH) + LENGTH(FLASH) - ${STORAGE_RESERVE_BYTES}, \"firmware overlaps persistent storage\")\n")
 target_link_options(${target_name} PRIVATE "LINKER:-T,${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld")
 pico_add_link_depend(${target_name} ${CMAKE_CURRENT_BINARY_DIR}/kv_reserve.ld)
 

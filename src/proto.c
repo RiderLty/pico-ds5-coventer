@@ -327,6 +327,11 @@ static void chan_dispatch(proto_chan_t *ch, uint8_t cmd, uint16_t msgid,
         int n = snprintf(info, sizeof info,
                          "pico-ds5-coventer\n"
                          "transport: %s\n"
+#if ENABLE_DS5_BT
+                         "input: bluetooth (Pico 2 W, DualSense/Edge)\n"
+#else
+                         "input: usb (PIO-USB GPIO12/13)\n"
+#endif
                          "protocol: 1 ids:1..65534 broadcast:65535\n"
                          "max_request: 512 max_test: 8388608\n"
                          "build: " __DATE__ " " __TIME__ "\n"

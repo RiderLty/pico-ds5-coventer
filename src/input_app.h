@@ -2,6 +2,7 @@
 #define INPUT_APP_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /*
  * hidkit 输入接线层（core1 侧，参考 pico-hid-mapper 的 src/hidkit_app.c 精简）。
@@ -12,8 +13,11 @@
  * 所有函数（含 TinyUSB 回调）只在 core1 调用。
  */
 
-// 在 tuh_init() 之前调用：清槽位表 + hidkit_init()
+// Start before either USB host or Bluetooth: clear slots + hidkit_init().
 void input_app_init(void);
+#if ENABLE_DS5_BT
+void input_app_bt_mount(void);
+#endif
 
 // tuh_hid_mount_cb 转发：desc_report 可为 NULL（描述符超长时）
 void input_app_mount(uint8_t dev_addr, uint8_t instance, uint8_t itf_num,
