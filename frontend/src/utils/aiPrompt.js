@@ -19,10 +19,10 @@ const PROMPT_HEAD = `你是 Pico DS5 转换器板载 Lua 脚本的编程助手�
 - 修改脚本务必用 replace_in_file 的搜索/替换块：search 必须与原文逐字符一致（含缩进），不要包含多余上下文，每块尽量短，但应包含足以唯一定位的上下文；多个块必须能按顺序独立匹配。先读取相关内容再编辑。
 
 ## 设备工作原理
-- RP2350 上的 PIO-USB Host 接收键鼠与手柄；原生 USB 向宿主模拟 DualSense，并按 ability_enable 开关键鼠和 WinUSB 通信接口。
-- 键鼠与手柄输入全部通过 Lua 的单向通知回调分发，无需 enable_listen_* 声明（全量监听）。回调返回值没有拦截语义。键鼠输出由 dkb_* / dmo_* 完成；手柄/触摸/六轴输出由 pad_btn / pad_abs / pad_touch / pad_motion / pad_disconnect 驱动 DS5 报告。
+- RP2350 上的 PIO-USB Host 接收键鼠与手柄；原生 USB 向宿主模拟 DualSense，并按 dev_enable 开关键鼠和 WinUSB 通信接口。
+- 键鼠与手柄输入全部通过 Lua 回调分发（全量监听：定义哪个回调就收哪个事件，没有任何开关或声明）。除 on_boot_button 外回调返回值都会忽略；on_boot_button(pressed) 返回 true 可拦截释放时默认开启 WinUSB，否则释放时开启 WinUSB并保持键盘、鼠标设置不变。输出函数一律以目标为前缀：kbd_*（宿主键盘）、mouse_*（宿主鼠标）、io_is_on（custom IO 接口）、pad_*（手柄/触摸板/六轴，驱动 DS5 报告）、dev_enable（接口开关）。另有板载 BOOTSEL 按键事件 on_boot_button(pressed)（设备侧 10ms 消抖，无对应输出函数）。
 - 本项目没有 mapper 的触屏映射引擎、映射开关、槽位配置、许可激活或 on_custom_event 通道，不能调用这些 API。
-- ability_enable 改变接口布局会重枚举并可能断开 WebUSB。通常保留 IO 为 true，并按需用 UART 恢复连接。
+- dev_enable 改变接口布局会重枚举并可能断开 WebUSB。三个参数各为三态（-1 保持 / 0 关 / 1 开），通常保持 IO 开启，并按需用 UART 恢复连接。
 - 日志和编辑可离线使用；设备离线时不能运行或验证脚本。不要根据离线编辑声称设备已经运行。
 
 ## Lua 语义与任务规划

@@ -16,7 +16,7 @@ void input_app_release_outputs(void) { ++releases; }
 static int noop(lua_State *L) { (void)L; return 0; }
 void lua_binder_rebind(void) {
     lua_core_register("print", noop);
-    lua_core_register("ability_enable", noop);
+    lua_core_register("dev_enable", noop);
     lua_core_register_in("hidkit", "info", noop);
 }
 static int bd_init(blockdevice_t *bd) { bd->is_initialized=true; return 0; }
@@ -89,12 +89,16 @@ int main(void) {
     assert(lua_store_init() && flash_devices==1); // repeated init retains the live store
     assert(lua_binder_is_ready() && s_image==s_default_image && !s_saved && s_dirty && !s_error[0]);
     unsigned initial_programs=programs, initial_erases=erases;
-    const char good[]="function on_key(k,d) seen=k end; marker=42";
+    const char good[]="function on_key(k,d) seen=k end; function on_boot_button(p) boot=p; boots=(boots or 0)+1; return p end; marker=42";
     upload(good,strlen(good));
     assert(s_image==s_default_image && programs==initial_programs);
     assert(!op(3)); assert(s_size==strlen(good) && !memcmp(s_image,good,s_size) && s_dirty);
     lua_binder_on_key(4,true);
     assert(lua_core_dostring("assert(marker==42 and seen==4)"));
+    // BOOTSEL 事件走同一条转发路径（core0 消抖后跨核投递，这里直接调转发口）
+    assert(lua_binder_on_boot_button(true));
+    assert(!lua_binder_on_boot_button(false));
+    assert(lua_core_dostring("assert(boots==2 and boot==false)"));
     assert(programs==initial_programs && erases==initial_erases);
     assert(!op(4) && s_saved && !s_dirty);
     unsigned small_erases=erases;
@@ -102,6 +106,10 @@ int main(void) {
     assert(erases==small_erases); // small records append within the erased sector
     run("marker=99"); assert(!op(9));
     assert(s_size==strlen(good) && !memcmp(s_image,good,s_size)); // unsaved run never replaced persisted source
+    run("function on_boot_button(p) end");
+    assert(!lua_binder_on_boot_button(false)); // nil/no return does not intercept
+    run("marker=1");
+    assert(!lua_binder_on_boot_button(false)); // unbound callback does not intercept
     upload("function invalid(",17);
     assert(op(3)==PROTO_ERR_SCRIPT && s_image==s_default_image);
     assert(strstr(s_error,"script"));

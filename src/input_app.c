@@ -311,27 +311,30 @@ static int _lcb_hidkit_info(lua_State *L) {
 }
 
 /*--------------------------------------------------------------------+
- * Lua：键鼠输出接口（dkb_* = direct keyboard，dmo_* = direct mouse output；
- * 绑定名与 pico-hid-mapper 一致，脚本可直接照搬其文档）
+ * Lua：键鼠输出接口（kbd_* 打给宿主键盘，mouse_* 打给宿主鼠标，
+ * io_is_on 查询 custom IO 通讯接口）
  *
- *   ability_enable(kbd, mouse, io) 开关 NKRO 键盘 / 16bit 鼠标 / custom IO
- *                                  通讯接口（默认全关；生效需 USB 重枚举，
- *                                  约 0.5s，期间 DS5 从主机短暂消失）
- *   dkb_key(keycode, down)         宿主键盘按键（HID Usage ID 0x04..0x73 /
- *                                  修饰键 0xE0..0xE7，NKRO 位图全键无冲）
- *   dkb_release_all()              抬起全部键（防粘键安全阀）
- *   dkb_led()                      主机写回的 LED 状态（bit0-4）
- *   dkb_state()                    4 个 u32（NKRO 状态 16 字节小端视图）
- *   dkb_is_down(keycode)
- *   dmo_move(dx, dy[, wheel])      相对位移（16bit 有符号；正 dx=右 正 dy=下）
- *   dmo_btn(button, down)          0=左 1=右 2=中 3=后退 4=前进
- *   dmo_release_all() / dmo_state() / dmo_is_down(b) / dmo_is_on()
+ *   dev_enable(kbd, mouse, io)  开关 NKRO 键盘 / 16bit 鼠标 / custom IO
+ *                               通讯接口。三个参数各为三态：-1 保持 / 0 关 /
+ *                               1 开（省略按 -1）。默认全关；生效需 USB 重枚举
+ *                               （约 0.5s，期间 DS5 从主机短暂消失）
+ *   kbd_key(keycode, down)      宿主键盘按键（HID Usage ID 0x04..0x73 /
+ *                               修饰键 0xE0..0xE7，NKRO 位图全键无冲）
+ *   kbd_release_all()           抬起全部键（防粘键安全阀）
+ *   kbd_led()                   主机写回的 LED 状态（bit0-4）
+ *   kbd_state()                 4 个 u32（NKRO 状态 16 字节小端视图）
+ *   kbd_is_down(keycode) / kbd_is_on()
+ *   mouse_move(dx, dy[, wheel]) 相对位移（16bit 有符号；正 dx=右 正 dy=下）
+ *   mouse_btn(button, down)     0=左 1=右 2=中 3=后退 4=前进
+ *   mouse_release_all()         抬起全部鼠标键
+ *   mouse_state() / mouse_is_down(b) / mouse_is_on()
+ *   io_is_on()                  custom IO 通讯接口是否启用
  *
  * 接口未启用时全部 no-op。数据通路：core1（本文件）维护状态并入跨核队列 →
  * core0 的 usb_km_service() 出队发送。
  *--------------------------------------------------------------------*/
 
-// dmo 侧按键状态（core1 驻留；随每次 push 带出，与位移帧不互斥）
+// mouse 侧按键状态（core1 驻留；随每次 push 带出，与位移帧不互斥）
 static uint8_t s_ms_out_buttons;
 
 void input_app_release_outputs(void) {
@@ -341,22 +344,24 @@ void input_app_release_outputs(void) {
     mouse_queue_push(0, 0, 0, 0);
 }
 
-static int _lcb_ability_enable(lua_State *L) {
-    bool kbd   = lua_toboolean(L, 1) != 0;
-    bool mouse = lua_toboolean(L, 2) != 0;
-    bool io    = lua_toboolean(L, 3) != 0;
-    if (!mouse) s_ms_out_buttons = 0;   // 关闭侧清状态，防重枚举后粘键
+// dev_enable(kbd, mouse, io)：三态开关，每个参数 <0 保持 / 0 关 / >0 开。
+// 省略的参数按 -1（保持）处理，所以只改一项时其余可以省掉。
+static int _lcb_dev_enable(lua_State *L) {
+    int kbd   = (int)luaL_optinteger(L, 1, -1);
+    int mouse = (int)luaL_optinteger(L, 2, -1);
+    int io    = (int)luaL_optinteger(L, 3, -1);
+    if (mouse == 0) s_ms_out_buttons = 0;   // 关闭鼠标侧清状态，防重枚举后粘键
     usb_km_request(kbd, mouse, io);
     return 0;
 }
 
-static int _lcb_dhid_is_on(lua_State *L) {
+static int _lcb_io_is_on(lua_State *L) {
     lua_pushboolean(L, usb_km_io_enabled());
     return 1;
 }
 
-// dmo 队列统一入口：带当前按键位出队（位移与按键状态解耦但同帧携带）
-static void dmo_push(int32_t dx, int32_t dy, int32_t wheel)
+// mouse 队列统一入口：带当前按键位出队（位移与按键状态解耦但同帧携带）
+static void mouse_push(int32_t dx, int32_t dy, int32_t wheel)
 {
     if (dx > 32767) dx = 32767; else if (dx < -32767) dx = -32767;
     if (dy > 32767) dy = 32767; else if (dy < -32767) dy = -32767;
@@ -364,54 +369,54 @@ static void dmo_push(int32_t dx, int32_t dy, int32_t wheel)
     mouse_queue_push((int16_t)dx, (int16_t)dy, (int8_t)wheel, s_ms_out_buttons);
 }
 
-static int _lcb_dkb_key(lua_State *L) {
+static int _lcb_kbd_key(lua_State *L) {
     int keycode = (int)luaL_checkinteger(L, 1);
     bool down = lua_toboolean(L, 2) != 0;
     if (keycode > 0 && keycode <= 0xFF) kbd_out_key((uint8_t)keycode, down);
     return 0;
 }
 
-static int _lcb_dkb_release_all(lua_State *L) {
+static int _lcb_kbd_release_all(lua_State *L) {
     (void)L;
     kbd_out_release_all();
     return 0;
 }
 
-static int _lcb_dkb_led(lua_State *L) {
+static int _lcb_kbd_led(lua_State *L) {
     lua_pushinteger(L, kbd_hid_led_state());
     return 1;
 }
 
-static int _lcb_dkb_is_on(lua_State *L) {
+static int _lcb_kbd_is_on(lua_State *L) {
     lua_pushboolean(L, usb_km_kbd_enabled());
     return 1;
 }
 
-// dkb_state() -> 4 个整数（小端 u32），即整份 NKRO 状态的 16 字节视图：
+// kbd_state() -> 4 个整数（小端 u32），即整份 NKRO 状态的 16 字节视图：
 //   [0] = 修饰键位图，[1..14] = 112 位键位图，[15] = 补齐（恒 0）
 // keycode (0x04 + n) 对应第 (8 + n) 位：word = 返回值[((8+n) >> 5) + 1]，
 // bit = (8 + n) & 31
-static int _lcb_dkb_state(lua_State *L) {
+static int _lcb_kbd_state(lua_State *L) {
     uint32_t w[4];
     kbd_out_state_words(w);
     for (int i = 0; i < 4; i++) lua_pushinteger(L, (lua_Integer)w[i]);
     return 4;
 }
 
-static int _lcb_dkb_is_down(lua_State *L) {
+static int _lcb_kbd_is_down(lua_State *L) {
     int keycode = (int)luaL_checkinteger(L, 1);
     bool down = keycode > 0 && keycode <= 0xFF && kbd_out_is_down((uint8_t)keycode);
     lua_pushboolean(L, down);
     return 1;
 }
 
-static int _lcb_dmo_is_on(lua_State *L) {
+static int _lcb_mouse_is_on(lua_State *L) {
     lua_pushboolean(L, usb_km_mouse_enabled());
     return 1;
 }
 
-// dmo_btn(button, down)：button 0=左 1=右 2=中 3=后退 4=前进
-static int _lcb_dmo_btn(lua_State *L) {
+// mouse_btn(button, down)：button 0=左 1=右 2=中 3=后退 4=前进
+static int _lcb_mouse_btn(lua_State *L) {
     int btn   = (int)luaL_checkinteger(L, 1);
     bool down = lua_toboolean(L, 2) != 0;
     if (!usb_km_mouse_enabled()) return 0;
@@ -419,37 +424,37 @@ static int _lcb_dmo_btn(lua_State *L) {
     uint8_t mask = (uint8_t)(1u << btn);
     if (down == !!(s_ms_out_buttons & mask)) return 0;   // 重复事件，忽略
     down ? (s_ms_out_buttons |= mask) : (s_ms_out_buttons &= (uint8_t)~mask);
-    dmo_push(0, 0, 0);
+    mouse_push(0, 0, 0);
     return 0;
 }
 
-// dmo_release_all()：抬起全部按键
-static int _lcb_dmo_release_all(lua_State *L) {
+// mouse_release_all()：抬起全部按键
+static int _lcb_mouse_release_all(lua_State *L) {
     (void)L;
     if (!usb_km_mouse_enabled()) return 0;
     s_ms_out_buttons = 0;
-    dmo_push(0, 0, 0);
+    mouse_push(0, 0, 0);
     return 0;
 }
 
-// dmo_move(dx, dy[, wheel])：相对位移；wheel 缺省 0（正 = 上滚）
-static int _lcb_dmo_move(lua_State *L) {
+// mouse_move(dx, dy[, wheel])：相对位移；wheel 缺省 0（正 = 上滚）
+static int _lcb_mouse_move(lua_State *L) {
     int32_t dx    = (int32_t)luaL_checkinteger(L, 1);
     int32_t dy    = (int32_t)luaL_checkinteger(L, 2);
     int32_t wheel = (int32_t)luaL_optinteger(L, 3, 0);
     if (!usb_km_mouse_enabled()) return 0;
     if (dx == 0 && dy == 0 && wheel == 0) return 0;
-    dmo_push(dx, dy, wheel);
+    mouse_push(dx, dy, wheel);
     return 0;
 }
 
-static int _lcb_dmo_state(lua_State *L) {
+static int _lcb_mouse_state(lua_State *L) {
     (void)L;
     lua_pushinteger(L, s_ms_out_buttons);   // bit0..4 = 左/右/中/后退/前进
     return 1;
 }
 
-static int _lcb_dmo_is_down(lua_State *L) {
+static int _lcb_mouse_is_down(lua_State *L) {
     int btn = (int)luaL_checkinteger(L, 1);
     bool down = btn >= 0 && btn <= 4 && ((s_ms_out_buttons >> btn) & 1u) != 0;
     lua_pushboolean(L, down);
@@ -577,30 +582,30 @@ static int _lcb_pad_disconnect(lua_State *L) {
 void lua_binder_rebind(void) {
     lua_binder_bind("print", _lcb_print);
     lua_binder_bind("warn",  _lcb_warn);
-    // 输出接口（ability_enable + dkb_*/dmo_*/dhid_*）
-    lua_binder_bind("ability_enable",  _lcb_ability_enable);
-    lua_binder_bind("dkb_key",         _lcb_dkb_key);
-    lua_binder_bind("dkb_release_all", _lcb_dkb_release_all);
-    lua_binder_bind("dkb_led",         _lcb_dkb_led);
-    lua_binder_bind("dkb_is_on",       _lcb_dkb_is_on);
-    lua_binder_bind("dkb_state",       _lcb_dkb_state);
-    lua_binder_bind("dkb_is_down",     _lcb_dkb_is_down);
-    lua_binder_bind("dmo_move",        _lcb_dmo_move);
-    lua_binder_bind("dmo_btn",         _lcb_dmo_btn);
-    lua_binder_bind("dmo_release_all", _lcb_dmo_release_all);
-    lua_binder_bind("dmo_state",       _lcb_dmo_state);
-    lua_binder_bind("dmo_is_down",     _lcb_dmo_is_down);
-    lua_binder_bind("dmo_is_on",       _lcb_dmo_is_on);
-    lua_binder_bind("dhid_is_on",      _lcb_dhid_is_on);
+
+    // 输出接口 —— 一律以目标为前缀：kbd_ 宿主键盘 / mouse_ 宿主鼠标 /
+    // io_ custom IO 通讯接口 / dev_ 设备级开关
+    lua_binder_bind("dev_enable",        _lcb_dev_enable);
+    lua_binder_bind("kbd_key",           _lcb_kbd_key);
+    lua_binder_bind("kbd_release_all",   _lcb_kbd_release_all);
+    lua_binder_bind("kbd_led",           _lcb_kbd_led);
+    lua_binder_bind("kbd_is_on",         _lcb_kbd_is_on);
+    lua_binder_bind("kbd_state",         _lcb_kbd_state);
+    lua_binder_bind("kbd_is_down",       _lcb_kbd_is_down);
+    lua_binder_bind("mouse_move",        _lcb_mouse_move);
+    lua_binder_bind("mouse_btn",         _lcb_mouse_btn);
+    lua_binder_bind("mouse_release_all", _lcb_mouse_release_all);
+    lua_binder_bind("mouse_state",       _lcb_mouse_state);
+    lua_binder_bind("mouse_is_down",     _lcb_mouse_is_down);
+    lua_binder_bind("mouse_is_on",       _lcb_mouse_is_on);
+    lua_binder_bind("io_is_on",          _lcb_io_is_on);
 
     // pad_* 手柄/触摸/六轴输出（驱动 DS5 报告）
-    lua_binder_bind("pad_btn",         _lcb_pad_btn);
-    lua_binder_bind("pad_abs",         _lcb_pad_abs);
-    lua_binder_bind("pad_touch",       _lcb_pad_touch);
-    lua_binder_bind("pad_motion",      _lcb_pad_motion);
-    lua_binder_bind("pad_disconnect",  _lcb_pad_disconnect);
-
-
+    lua_binder_bind("pad_btn",           _lcb_pad_btn);
+    lua_binder_bind("pad_abs",           _lcb_pad_abs);
+    lua_binder_bind("pad_touch",         _lcb_pad_touch);
+    lua_binder_bind("pad_motion",        _lcb_pad_motion);
+    lua_binder_bind("pad_disconnect",    _lcb_pad_disconnect);
 
     // hidkit 表：信息查询 + 常量（段前缀 / BTN_* / 六轴量程锚点）
     lua_core_register_in("hidkit", "info", _lcb_hidkit_info);

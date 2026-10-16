@@ -13,13 +13,14 @@ extern "C" {
  * lua_binder — lua_core 的唯一调用者，对外隐藏 Lua 实现细节
  * （由 pico-hid-mapper 的 src/lua_binder.c 按本工程架构精简移植）。
  *
- * 架构：输入与输出完全解耦，中间只有 Lua —— 本模块只做**单向事件通知**
- * （C → Lua 回调，无返回值、无拦截语义；mapper 版的"返回 true 拦截 C 默认
- * 处理"语义已删除，本工程 C 侧没有默认映射）。输出由脚本直接调用 C 注册
- * 的 dkb_* 、dmo_* 、pad_* 输出函数。
+ * 架构：输入与输出完全解耦，中间只有 Lua —— 本模块负责 C → Lua 事件回调。
+ * 除板载 BOOTSEL 按键外，回调返回值都会被忽略；on_boot_button 返回真值可
+ * 拦截释放时的默认 WinUSB 开启行为。输出由脚本直接调用 C 注册
+ * 的 kbd_* 、mouse_* 、pad_* 输出函数。
  *
- * 事件全量监听：hidkit 事件一律直投 Lua 回调，无需 enable_listen_* 声明。
- * 未定义的回调只需一次整数比较即返回（g_lid_* < 0 检查）。
+ * 事件全量监听：hidkit 事件一律直投 Lua 回调，无需任何声明 —— 脚本里
+ * 定义哪个回调就收哪个事件。未定义的回调只需一次整数比较即返回
+ * （g_lid_* < 0 检查）。
  */
 
 // 热重载回调：lua_binder_init 在创建新 VM 后、加载脚本前调用。
@@ -35,7 +36,7 @@ bool lua_binder_is_ready(void);
 // 注册 C 函数到 Lua 全局表（func: lua_CFunction）
 bool lua_binder_bind(const char *name, void *func);
 
-//--- C → Lua 事件转发（单向通知，无返回值）----------------------------
+//--- C → Lua 事件转发（BOOTSEL 回调返回拦截结果，其余回调无返回值）------
 
 // 键盘按键（keycode = HID Usage ID）
 void lua_binder_on_key(uint8_t keycode, bool down);
@@ -66,6 +67,10 @@ void lua_binder_on_touchpad(uint32_t meta, uint32_t dims,
 
 // 设备被丢弃通知 on_dropped(slot, vid, pid)。无拦截语义
 void lua_binder_on_dropped(int8_t slot, uint16_t vid, uint16_t pid);
+
+// 板载 BOOTSEL 按键 on_boot_button(pressed)。返回 true 表示拦截默认行为；
+// false、nil、无返回值、未绑定或调用出错均返回 false。
+bool lua_binder_on_boot_button(bool pressed);
 
 //--- 周期处理 ----------------------------------------------------------
 

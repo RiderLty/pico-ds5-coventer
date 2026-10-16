@@ -71,7 +71,8 @@ Device FIFO 的竞态——**不要在 core1 或 Lua 里调 `tud_*` 或改写描
 
 ### 运行期接口热重载（`usb_km.c` + `usb_descriptors.c: usb_km_apply`）
 
-Lua `ability_enable(kbd, mouse, io)` 异步提交目标状态（原子变量），core0
+Lua `dev_enable(kbd, mouse, io)`（三个三态参数：`-1` 保持 / `0` 关 / `1` 开）
+异步提交目标状态（原子变量），core0
 `usb_km_task()` 检测差异后：`tud_disconnect()` → 500ms → `usb_km_apply()` 组装配置
 描述符 → `tud_connect()`。相同状态不重枚举。flash 基线 227B/4 接口，全开
 300B/7 接口。
@@ -111,9 +112,11 @@ TX 用，持自旋锁防双核撕裂。
 
 ### Lua 接线（`lua_core.c` / `lua_binder.c` / `input_app.c`）
 
-`lua_binder` 只做**单向事件通知**（C → Lua，无返回值、无拦截语义）。hidkit 事件
-全量直投 Lua 回调，无需 `enable_listen_*` 声明。输出由脚本调 C 注册函数
-（`dkb_*` / `dmo_*` / `pad_*` / `ability_enable`）。
+`lua_binder` 负责 C → Lua 事件回调；除 `on_boot_button` 外回调返回值都会忽略。
+`on_boot_button` 返回真值可拦截释放时默认开启 WinUSB。hidkit 事件
+全量直投 Lua 回调（脚本里定义哪个回调就收哪个事件，无需任何开关）。输出由脚本调
+C 注册函数，一律以**目标**为前缀：`kbd_`（宿主键盘）/ `mouse_`（宿主鼠标）/ `io_is_on`
+（custom IO 接口）/ `pad_`（DS5 手柄·触摸板·六轴）/ `dev_enable`（接口开关）。
 
 - 新增 Lua 函数：在 `input_app.c` 的 `lua_binder_rebind()` 里 `lua_binder_bind()`。
   rebind 在 VM 重建后、脚本加载前调用。
@@ -125,6 +128,10 @@ TX 用，持自旋锁防双核撕裂。
   （**自动生成，勿手改**；CMake 自动重新生成）。
 - 手柄/触摸/六轴输出由 Lua `pad_*` 函数经 `input_queue` 驱动 `ds5_pad.c`，
   不再有 C 直通管线。
+- 板载 BOOTSEL 按键（`boot_button.c`）：事件源在 **core0**（读该脚要脱离 XIP，
+  会踩踏另一核的 flash 访问，故用 `multicore_lockout` 停住 core1），经小型 SPSC 环
+  投到 core1，再由 `lua_binder_on_boot_button()` 调 `on_boot_button(pressed)`。
+  跨核投递路径见该文件头注释。
 
 ## 平台坑（均已实测踩过，勿重蹈）
 
@@ -141,6 +148,11 @@ TX 用，持自旋锁防双核撕裂。
   源正是 clk_peri——必须 `clock_configure_undivided()` 挂回 clk_sys。系统时钟须为
   12MHz 整数倍（PIO-USB 依赖），当前 240MHz。
 - **RX 悬空**：RP2350 pad 复位无上下拉，UART RX 需 `gpio_pull_up()`。
+- **BOOTSEL 与 XIP**：BOOTSEL 挂在 QSPI flash 的 CS 脚上，读它要把 CS 临时置 Hi-Z
+  并脱离 XIP——窗口期内**另一核的任何 flash 访问都会崩**。必须先用
+  `multicore_lockout_start_timeout_us()` 停住另一核（victim 由 core1_main 的
+  `flash_safe_execute_core_init()` 注册），读完立刻 `multicore_lockout_end_blocking()`；
+  读取函数本身须 `__no_inline_not_in_flash_func`。见 `src/boot_button.c`。
 - **`HIDKIT_HOT` 必须走 `HIDKIT_USER_CONFIG`**（`src/hidkit_user_config.h`）：带括号
   的宏定义会被 CMake `target_compile_definitions` 静默丢弃（flags.make 里根本不
   出现），热路径就悄悄留在 flash。

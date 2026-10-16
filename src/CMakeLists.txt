@@ -16,6 +16,7 @@ target_sources(${target_name} PRIVATE
  debug.c
  input_queue.c
  ds5_pad.c
+ boot_button.c
  audio_stub.c
  lua_core.c
  lua_binder.c

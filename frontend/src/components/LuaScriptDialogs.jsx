@@ -121,7 +121,8 @@ export function LuaExportDialog({ open, onClose, script, onNotify }) {
 // onApplyFromFile(text, fname)：文件内容放进编辑器（尚未保存）
 // onEdit(item)：脚本库存档 → 只放进编辑器（不加载到内存）
 // onApply(item)：脚本库存档 → 编辑器 + 加载到内存
-export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, active = true }) {
+// onExport()：导出编辑器当前脚本（打开「导出脚本」弹窗）
+export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, onExport, active = true }) {
     const [saved, setSaved] = useState([]);
     const [dragOver, setDragOver] = useState(false);
     const [pendingDelete, setPendingDelete] = useState(null);  // 两步确认删除
@@ -179,6 +180,14 @@ export function LuaScriptManager({ onApplyFromFile, onEdit, onApply, active = tr
             </Box>
             <input ref={fileRef} type="file" accept=".lua,text/plain" hidden
                 onChange={(e) => { readFirstFile(e.target.files); e.target.value = ''; }} />
+
+            {onExport && (
+                <Button size="small" variant="outlined" fullWidth disableElevation
+                    startIcon={<DownloadIcon sx={{ fontSize: 16 }} />}
+                    onClick={onExport} sx={{ flexShrink: 0, textTransform: 'none' }}>
+                    导出当前脚本
+                </Button>
+            )}
 
             <PanelGroup dense title={`浏览器脚本库（${saved.length}）`}
                 hint="用「导出」保存到这里，换浏览器或清了站点数据就没了"

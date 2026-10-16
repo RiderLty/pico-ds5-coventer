@@ -13,13 +13,17 @@ export class WorkspaceModel {
             if (value && typeof value.script === 'string') draft = value;
         } catch { /* unavailable storage or a damaged draft: start with the template */ }
         this.snapshot = { script: draft?.script ?? defaultSource, revision: 0, hasDraft: !!draft,
-            draftError: '', notice: draft ? '已恢复浏览器草稿，连接设备不会覆盖它。' : '可离线编辑；连接设备后读取当前运行脚本。' };
+            draftError: '', notice: draft ? '已恢复浏览器草稿，连接设备不会覆盖它。' : '', noticeSeq: 0 };
     }
     getSnapshot = () => this.snapshot;
     getScript = () => this.snapshot.script;
     subscribe = fn => { this.listeners.add(fn); return () => this.listeners.delete(fn); };
     update(patch) {
-        this.snapshot = { ...this.snapshot, ...patch };
+        const next = { ...this.snapshot, ...patch };
+        // noticeSeq：提示文本可能重复（同一操作连做两次），UI 靠这个自增序号判断
+        // "又来了条新提示"，从而重置自动消失计时。
+        if ('notice' in patch) next.noticeSeq = (this.snapshot.noticeSeq || 0) + 1;
+        this.snapshot = next;
         for (const fn of this.listeners) fn();
     }
     edit = (script, notice = '') => {

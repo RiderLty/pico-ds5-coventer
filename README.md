@@ -11,7 +11,7 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
 键鼠 / Xbox 手柄 / Switch Pro / HID 手柄（可经 USB Hub）
                       │
        PIO-USB Host，core1，GPIO12/13
-          ├─ 键鼠事件 → Lua → dkb_* / dmo_* → 跨核队列
+          ├─ 键鼠事件 → Lua → kbd_* / mouse_* → 跨核队列
           └─ 手柄状态 → 跨核队列
                       │
              原生 USB Device，core0
@@ -27,9 +27,9 @@ USB 输入 → Sony DualSense (DS5) 转换器，运行于 Raspberry Pi Pico 2 (R
 - 手柄状态经 C 管线直通 DS5：双摇杆、模拟扳机、十字键和数字按键；拔出后回到空闲态。
   XInput 支持 Xbox 360/One/Series 有线输入，Switch Pro 经 USB 握手与 SPI 校准读取。
 - 键鼠输入经 Lua 转发到宿主键鼠接口。C 侧固定 FPS 键鼠→手柄映射已移除，
-  Lua 回调是事件通知，返回值不拦截或改变 C 手柄直通路径。
+  Lua 回调是事件通知；除 `on_boot_button` 外返回值不拦截或改变 C 手柄直通路径。
 - 上电时输出接口均关闭，配置为 DS5 + UAC1 音频（227 字节、4 个接口）。
-  默认 `scripts/default.lua` 累计 tick 时间约 5 秒后调用 `ability_enable(true, true, true)`，
+  默认 `scripts/default.lua` 累计 tick 时间约 5 秒后调用 `dev_enable(1, 1, 1)`，
   经 USB 重枚举追加鼠标、键盘和 WinUSB 通讯接口（300 字节、7 个接口）。断开等待为 500ms，
   主机重新枚举还需要额外时间，期间 DS5 上报暂停。
 - 若主机连接晚于脚本的 5 秒延时，首次看到的配置可能已经包含键鼠。
@@ -48,7 +48,7 @@ Misc → 触摸板按键，十字键直通。
 
 ## 键鼠热重载
 
-Lua `ability_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开窗口内组装配置描述符、
+Lua `dev_enable(kbd, mouse, io)` 异步提交请求，core0 在设备断开窗口内组装配置描述符、
 更新 HID 实例和队列状态，再连接等待主机枚举。相同状态的请求不会再次断开。
 
 | 接口 | USB 接口号 | TinyUSB HID 实例 | 端点 |
@@ -83,7 +83,7 @@ RP2350 的队列临界区必须通过 SDK 初始化，`usb_km_init()` 在 core1 
 
 ## Lua 接线
 
-hidkit 事件全量直投 Lua 回调，无需 `enable_listen_*` 声明。
+hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个事件，无需任何开关或声明。
 默认脚本将键盘、鼠标、手柄、触摸和六轴原样转发。
 
 | 事件回调 | 说明 |
@@ -96,28 +96,34 @@ hidkit 事件全量直投 Lua 回调，无需 `enable_listen_*` 声明。
 | `on_gamepad_abs(lsx, lsy, rsx, rsy, lt, rt)` | 手柄轴（±32767）/扳机（0..32767） |
 | `on_motion(gx, gy, gz, ax, ay, az)` | 六轴（陀螺 ±2000dps / 加速度 ±4g，归一化 ±32767） |
 | `on_touchpad(meta, dims, x0, y0, ..., x9, y9)` | 触摸板快照（10 槽位，meta bit0-9 触点在位） |
+| `on_boot_button(pressed)` | 板载 BOOTSEL 按键（按下 true / 抬起 false，设备侧消抖）；返回 true 拦截默认行为，否则释放时开启 WinUSB，键盘和鼠标保持不变 |
 | `on_dropped(slot, vid, pid)` | 设备被丢弃通知 |
 | `tick(dt_us)` | 周期回调（dt = 距上次微秒差） |
 
 `hidkit.info()` 输出登记表，`hidkit.BTN_*` 等提供语义常量。
 
+输出函数一律以**目标**为前缀，与输入侧的 `on_*` 回调形成对照：
+`kbd_` 宿主键盘 / `mouse_` 宿主鼠标 / `io_` custom IO 通讯接口 /
+`pad_` DS5 报告（手柄·触摸板·六轴）/ `dev_` 设备级开关。
+
 | 输出函数 | 用途 |
 |---|---|
-| `ability_enable(kbd, mouse, io)` | 开关接口；参数顺序是键盘、鼠标、IO 通讯 |
-| `dkb_key(keycode, down)` | 键盘 Usage `0x04..0x73`，修饰键 `0xe0..0xe7` |
-| `dkb_release_all()` / `dkb_is_down(keycode)` | 抬起全部键 / 查询按键 |
-| `dkb_is_on()` / `dkb_led()` / `dkb_state()` | 生效开关 / LED 位 / 状态（4 个 u32） |
-| `dmo_move(dx, dy[, wheel])` | 16bit 相对位移；正 dx=右、正 dy=下、正 wheel=上滚 |
-| `dmo_btn(button, down)` | 0=左、1=右、2=中、3=后退、4=前进 |
-| `dmo_release_all()` / `dmo_is_down(button)` | 抬起全部鼠标键 / 查询按键 |
-| `dmo_is_on()` / `dmo_state()` | 生效开关 / 按键位掩码 |
+| `dev_enable(kbd, mouse, io)` | 开关接口；顺序为键盘、鼠标、IO 通讯，各参数三态：`-1` 保持 / `0` 关 / `1` 开（省略按 `-1`） |
+| `kbd_key(keycode, down)` | 键盘 Usage `0x04..0x73`，修饰键 `0xe0..0xe7` |
+| `kbd_release_all()` / `kbd_is_down(keycode)` | 抬起全部键 / 查询按键 |
+| `kbd_is_on()` / `kbd_led()` / `kbd_state()` | 生效开关 / LED 位 / 状态（4 个 u32） |
+| `mouse_move(dx, dy[, wheel])` | 16bit 相对位移；正 dx=右、正 dy=下、正 wheel=上滚 |
+| `mouse_btn(button, down)` | 0=左、1=右、2=中、3=后退、4=前进 |
+| `mouse_release_all()` / `mouse_is_down(button)` | 抬起全部鼠标键 / 查询按键 |
+| `mouse_is_on()` / `mouse_state()` | 生效开关 / 按键位掩码 |
+| `io_is_on()` | custom IO 通讯接口是否启用 |
 | `pad_btn(code, pressed)` | 手柄按键状态（hidkit BTN_* 0..31） |
 | `pad_abs(lsx, lsy, rsx, rsy, lt, rt)` | 手柄轴/扳机（±32767 / 0..32767） |
 | `pad_touch(x0, y0, x1, y1, down1, down2)` | 触摸板 2 触点（12-bit 坐标） |
 | `pad_motion(gx, gy, gz, ax, ay, az)` | 六轴（±32767） |
 | `pad_disconnect()` | 手柄断连帧（清零状态） |
 
-接口关闭时输出调用不转发。`dkb_is_on()` / `dmo_is_on()` 表示设备侧生效开关，
+接口关闭时输出调用不转发。`kbd_is_on()` / `mouse_is_on()` 表示设备侧生效开关，
 不代表主机已完成枚举。键盘队列保存绝对状态、满时丢旧保新；鼠标队列合并增量，
 端点忙时重试，位移超过报告范围时会限幅。
 
@@ -185,7 +191,10 @@ KV 保存、删除和初始化 / GC 经 SDK `flash_safe_execute` 暂停双核与
 ## 已知限制
 
 - 震动、灯条、自适应扳机输出被忽略；音频接口无实际声音。
-- 六轴与触摸数据使用模板，不转发真实运动/触摸；键鼠不映射为 DS5 输入。
+- 六轴与触摸板由默认脚本原样转发（`on_motion` → `pad_motion`、`on_touchpad` → `pad_touch`，
+  触摸只取前 2 个触点，DS5 报告本就只有 2 个触点槽）；键鼠不映射为 DS5 输入。
+- 板载 BOOTSEL 按键以 10ms 轮询 + 三次一致消抖检测，短于约 30ms 的点按可能漏掉；
+  读该脚会短暂脱离 XIP，因此每次轮询要停住另一核几微秒（不适合当高频输入）。
 - 多手柄最终汇入同一份 DS5 状态，主要面向单手柄场景。
 - 当前键盘转发范围为 112 个常规键与 8 个修饰键，不包括消费者控制等其他 Usage Page。
 - 热重载的硬件验证范围见专门文档，尚未覆盖所有系统与反复切换组合。

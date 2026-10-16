@@ -1,6 +1,6 @@
 # USB 描述符热重载
 
-本功能通过 Lua `ability_enable(kbd, mouse, io)` 运行期追加或移除键鼠 HID 接口
+本功能通过 Lua `dev_enable(kbd, mouse, io)` 运行期追加或移除键鼠 HID 接口
 与 custom IO 通讯接口。
 DS5 + UAC1 基线不变，设备身份始终保持 Sony `054c:0ce6`。
 实现参考 `../pico-hid-mapper` 的配置描述符追加和断开/重连流程。
@@ -53,16 +53,16 @@ critical_section_init_with_lock_num(&cs, next_striped_spin_lock_num());
 
 ## 配置组合
 
-| `ability_enable(kbd, mouse, io)` | 配置长度 | 接口数 | HID 实例布局 |
+| `dev_enable(kbd, mouse, io)` | 配置长度 | 接口数 | HID 实例布局 |
 |---|---|---|---|
-| `false, false, false` | 227B | 4 | DS5=0 |
-| `false, true, false` | 252B | 5 | DS5=0，鼠标=1 |
-| `true, false, false` | 252B | 5 | DS5=0，键盘=1 |
-| `true, true, false` | 277B | 6 | DS5=0，鼠标=1，键盘=2 |
-| `false, false, true` | 250B | 5 | DS5=0，IO=1 |
-| `false, true, true` | 275B | 6 | DS5=0，鼠标=1，IO=2 |
-| `true, false, true` | 275B | 6 | DS5=0，键盘=1，IO=2 |
-| `true, true, true` | 300B | 7 | DS5=0，鼠标=1，键盘=2，IO=3 |
+| `0, 0, 0` | 227B | 4 | DS5=0 |
+| `0, 1, 0` | 252B | 5 | DS5=0，鼠标=1 |
+| `1, 0, 0` | 252B | 5 | DS5=0，键盘=1 |
+| `1, 1, 0` | 277B | 6 | DS5=0，鼠标=1，键盘=2 |
+| `0, 0, 1` | 250B | 5 | DS5=0，IO=1 |
+| `0, 1, 1` | 275B | 6 | DS5=0，鼠标=1，IO=2 |
+| `1, 0, 1` | 275B | 6 | DS5=0，键盘=1，IO=2 |
+| `1, 1, 1` | 300B | 7 | DS5=0，鼠标=1，键盘=2，IO=3 |
 
 音频占接口 0..2，DS5 固定为接口 3、IN `0x84` / OUT `0x03`。
 鼠标启用时为接口 4、IN `0x86`、MPS 8B；键盘为接口 4 或 5、IN `0x87`、MPS 16B；
@@ -127,7 +127,7 @@ proto 通道就绪前的 boot 极早期日志直接丢弃。TinyUSB debug 日志
 ## 主线默认行为
 
 - 上电仅返回 flash 基线，键鼠与 IO 开关均为 false。
-- 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `ability_enable(true, true, true)`。
+- 默认脚本累计 `tick(dt_us)` 约 5 秒后请求 `dev_enable(1, 1, 1)`。
   计时从 Lua tick 启动开始，不从主机首次挂载开始；主机晚连接时可能直接看到键鼠配置。
 - `USB_KM_BOOT`、`USB_KM_HOT_TEST` 和首次挂载后 15 秒等待仅用于故障隔离，已删除。
 - TinyUSB 默认 debug=0；设备日志统一走 DEBUG → PRINT 通道。

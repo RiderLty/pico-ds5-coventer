@@ -1,17 +1,21 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Box, Button, IconButton, LinearProgress, Menu, MenuItem, Stack, TextField, Typography } from '@mui/material';
-import CodeIcon from '@mui/icons-material/Code';
+import { Box, Button, IconButton, LinearProgress, Snackbar, Stack, TextField, Typography } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import SaveIcon from '@mui/icons-material/Save';
-import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import ContrastIcon from '@mui/icons-material/Contrast';
 import ViewSidebarIcon from '@mui/icons-material/ViewSidebar';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
+import UsbIcon from '@mui/icons-material/Usb';
+import UploadIcon from '@mui/icons-material/Upload';
+import DescriptionIcon from '@mui/icons-material/Description';
+import StorageIcon from '@mui/icons-material/Storage';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import CodeEditor from './CodeEditor';
 import LogViewer from './LogViewer';
 import { LuaScriptManager, LuaExportDialog } from './LuaScriptDialogs';
 import AiChatPanel from './ai/AiChatPanel';
-import { DialogShell, StatusPill, PANEL_LINE } from './PanelKit';
+import { DialogShell, StatusPill, PANEL_LINE, PanelGroup, PanelRow, DeviceEntry } from './PanelKit';
 import { deviceSession, SCRIPT_MAX_BYTES } from '../utils/deviceSession';
 import { WorkspaceModel } from '../utils/workspaceModel';
 import { clearLogs, exportLogLines, usePicoLogs } from '../utils/logStore';
@@ -116,16 +120,16 @@ function LogDragHandle({ onStart, onReset, dragging }) {
     );
 }
 
-// ── 左侧面板：可拖动宽度 + 展开状态，均存浏览器 ──────────────────────────
-// 仿 VS Code 的左侧栏：编辑区左侧一条可左右拖动的面板，承载「脚本管理」等区段。
-// 展开状态（open）与宽度（width）都写 localStorage，下次打开页面自动恢复。
-// 双击分割条回到默认宽度。向右拖 → 面板变宽。
+// ── 左侧面板：可拖动宽度 + 展开状态 + 当前区段，均存浏览器 ────────────────
+// 仿 VS Code：最左一列活动栏（图标）切换区段，右侧是区段内容。
+// 展开状态 / 宽度 / 当前区段都写 localStorage，下次打开页面自动恢复。
 const LEFT_WIDTH_KEY = 'ds5_left_panel_width_v1';
 const LEFT_OPEN_KEY = 'ds5_left_panel_open_v1';
+const LEFT_SECTION_KEY = 'ds5_left_panel_section_v1';
 const LEFT_WIDTH_MIN = 200;
 
 function defaultLeftWidth() {
-    return 300;
+    return 320;
 }
 
 function maxLeftWidth() {
@@ -137,6 +141,9 @@ function maxLeftWidth() {
 function useLeftPanel() {
     const [open, setOpen] = useState(() => {
         try { return localStorage.getItem(LEFT_OPEN_KEY) === '1'; } catch { return false; }
+    });
+    const [section, setSection] = useState(() => {
+        try { return localStorage.getItem(LEFT_SECTION_KEY) || 'device'; } catch { return 'device'; }
     });
     const [width, setWidth] = useState(() => {
         try {
@@ -151,10 +158,13 @@ function useLeftPanel() {
     const widthRef = useRef(width);
     widthRef.current = width;
 
-    // 展开状态持久化（首帧也会写一次，把缺省值固化下来）
+    // 展开状态 / 区段持久化（首帧也会写一次，把缺省值固化下来）
     useEffect(() => {
         try { localStorage.setItem(LEFT_OPEN_KEY, open ? '1' : '0'); } catch { /* ignore */ }
     }, [open]);
+    useEffect(() => {
+        try { localStorage.setItem(LEFT_SECTION_KEY, section); } catch { /* ignore */ }
+    }, [section]);
 
     // 视口变化时把宽度重新钳进合法区间
     useEffect(() => {
@@ -190,94 +200,7 @@ function useLeftPanel() {
         try { localStorage.removeItem(LEFT_WIDTH_KEY); } catch { /* ignore */ }
     }, []);
 
-    return { open, setOpen, width, dragging, startDrag, reset };
-}
-
-// 左侧面板（仿 VS Code）：区段标题 + 内容区。目前只有一个区段「脚本管理」。
-// 后续要加区段，在标题栏下挂一组 tab、或按区段渲染不同内容即可。
-function LeftPanel({ width, onApplyFromFile, onEdit, onApply }) {
-    return (
-        <Box component="aside" className="workspace-left" style={{ '--left-width': `${width}px` }}>
-            <Box className="workspace-left-header">
-                <FolderOpenIcon sx={{ fontSize: 16, color: 'var(--panel-accent)' }} />
-                <Typography sx={{ fontSize: 12, fontWeight: 600, color: 'var(--panel-ink)' }}>脚本管理</Typography>
-            </Box>
-            <Box className="workspace-left-body">
-                <LuaScriptManager onApplyFromFile={onApplyFromFile} onEdit={onEdit} onApply={onApply} />
-            </Box>
-        </Box>
-    );
-}
-
-// ── AI 面板宽度：可拖动分割条 + 浏览器记忆 ──────────────────────────────
-// 编辑区与 AI 面板之间加一条可左右拖动的分割条；松手后宽度存 localStorage，
-// 下次打开页面自动恢复。双击分割条回到默认宽度（35vw，钳制在 360~600px）。
-// 与日志面板高度同构，只是轴向相反：向左拖 → AI 面板变宽。
-const AI_WIDTH_KEY = 'ds5_ai_panel_width_v1';
-const AI_WIDTH_MIN = 300;
-
-function defaultAiWidth() {
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
-    return Math.max(360, Math.min(600, Math.round(vw * 0.35)));
-}
-
-function maxAiWidth() {
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
-    return Math.max(AI_WIDTH_MIN, vw - 320);   // 给编辑器至少留 320px
-}
-
-function useAiPanelWidth(open) {
-    const [width, setWidth] = useState(() => {
-        try {
-            const stored = parseInt(localStorage.getItem(AI_WIDTH_KEY), 10);
-            if (Number.isFinite(stored) && stored >= AI_WIDTH_MIN) {
-                // 存的值可能来自更宽的屏幕，加载时按当前视口钳一下上限
-                return Math.min(stored, maxAiWidth());
-            }
-        } catch { /* 隐私模式 / storage 不可用 */ }
-        return defaultAiWidth();
-    });
-    const [dragging, setDragging] = useState(false);
-    const widthRef = useRef(width);
-    widthRef.current = width;
-
-    // 视口变化时把宽度重新钳进合法区间（宽度比高度更怕越界，会把编辑器挤没）
-    useEffect(() => {
-        const onResize = () => setWidth(w => Math.max(AI_WIDTH_MIN, Math.min(maxAiWidth(), w)));
-        window.addEventListener('resize', onResize);
-        return () => window.removeEventListener('resize', onResize);
-    }, []);
-
-    const startDrag = useCallback((e) => {
-        if (!open) return;
-        e.preventDefault();
-        const startX = e.clientX;
-        const startW = widthRef.current;
-        setDragging(true);
-        // is-dragging：全站禁选文字（index.css 里有 !important 规则），防止拖动时把编辑器/对话刷蓝
-        document.body.classList.add('is-dragging');
-
-        const onMove = (ev) => {
-            const delta = startX - ev.clientX;   // 向左拖 → delta 正 → 变宽
-            setWidth(Math.max(AI_WIDTH_MIN, Math.min(maxAiWidth(), startW + delta)));
-        };
-        const onUp = () => {
-            setDragging(false);
-            document.body.classList.remove('is-dragging');
-            document.removeEventListener('pointermove', onMove);
-            document.removeEventListener('pointerup', onUp);
-            try { localStorage.setItem(AI_WIDTH_KEY, String(widthRef.current)); } catch { /* 存不下就只在本次会话生效 */ }
-        };
-        document.addEventListener('pointermove', onMove);
-        document.addEventListener('pointerup', onUp);
-    }, [open]);
-
-    const reset = useCallback(() => {
-        setWidth(defaultAiWidth());
-        try { localStorage.removeItem(AI_WIDTH_KEY); } catch { /* ignore */ }
-    }, []);
-
-    return { width, dragging, startDrag, reset };
+    return { open, setOpen, section, setSection, width, dragging, startDrag, reset };
 }
 
 // 竖直分割条（左右拖动）：左侧面板与 AI 面板共用。
@@ -314,6 +237,100 @@ function ColResizeHandle({ onStart, onReset, dragging, className, label }) {
     );
 }
 
+// ── AI 面板：可拖动宽度 + 展开状态，均存浏览器 ──────────────────────────
+// 与左侧面板同构（键名各自独立，互不干扰）：
+//   · 编辑区与 AI 面板之间的分割条可左右拖动，松手后宽度存 localStorage；
+//   · 展开 / 收起状态同样落盘，下次打开页面自动恢复。
+// 双击分割条回到默认宽度（35vw，钳制在 360~600px）。
+const AI_WIDTH_KEY = 'ds5_ai_panel_width_v1';
+const AI_OPEN_KEY = 'ds5_ai_panel_open_v1';
+const AI_WIDTH_MIN = 300;
+
+// 首次进入（localStorage 里还没有记录）时的缺省：宽屏开、窄屏关。
+// 窄屏三栏放不下，AI 面板铺满整屏会直接盖住编辑器，一进来就看不到代码。
+function defaultAiOpen() {
+    return typeof window === 'undefined' || window.innerWidth > 720;
+}
+
+function defaultAiWidth() {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    return Math.max(360, Math.min(600, Math.round(vw * 0.35)));
+}
+
+function maxAiWidth() {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    return Math.max(AI_WIDTH_MIN, vw - 320);   // 给编辑器至少留 320px
+}
+
+function useAiPanel() {
+    const [open, setOpen] = useState(() => {
+        try {
+            const stored = localStorage.getItem(AI_OPEN_KEY);
+            if (stored === '1') return true;
+            if (stored === '0') return false;
+        } catch { /* 隐私模式 / storage 不可用 */ }
+        return defaultAiOpen();
+    });
+    const [width, setWidth] = useState(() => {
+        try {
+            const stored = parseInt(localStorage.getItem(AI_WIDTH_KEY), 10);
+            if (Number.isFinite(stored) && stored >= AI_WIDTH_MIN) {
+                // 存的值可能来自更宽的屏幕，加载时按当前视口钳一下上限
+                return Math.min(stored, maxAiWidth());
+            }
+        } catch { /* 隐私模式 / storage 不可用 */ }
+        return defaultAiWidth();
+    });
+    const [dragging, setDragging] = useState(false);
+    const widthRef = useRef(width);
+    widthRef.current = width;
+
+    // 展开状态持久化（首帧也会写一次，把缺省值固化下来）
+    useEffect(() => {
+        try { localStorage.setItem(AI_OPEN_KEY, open ? '1' : '0'); } catch { /* ignore */ }
+    }, [open]);
+
+    // 视口变化时把宽度重新钳进合法区间（宽度比高度更怕越界，会把编辑器挤没）
+    useEffect(() => {
+        const onResize = () => setWidth(w => Math.max(AI_WIDTH_MIN, Math.min(maxAiWidth(), w)));
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
+
+    const startDrag = useCallback((e) => {
+        if (!open) return;
+        e.preventDefault();
+        const startX = e.clientX;
+        const startW = widthRef.current;
+        setDragging(true);
+        document.body.classList.add('is-dragging');
+
+        const onMove = (ev) => {
+            const delta = startX - ev.clientX;   // 向左拖 → delta 正 → 变宽
+            setWidth(Math.max(AI_WIDTH_MIN, Math.min(maxAiWidth(), startW + delta)));
+        };
+        const onUp = () => {
+            setDragging(false);
+            document.body.classList.remove('is-dragging');
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onUp);
+            try { localStorage.setItem(AI_WIDTH_KEY, String(widthRef.current)); } catch { /* ignore */ }
+        };
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+    }, [open]);
+
+    const reset = useCallback(() => {
+        setWidth(defaultAiWidth());
+        try { localStorage.removeItem(AI_WIDTH_KEY); } catch { /* ignore */ }
+    }, []);
+
+    return { open, setOpen, width, dragging, startDrag, reset };
+}
+
+// 弹窗底栏按钮的统一样式（小号、无大写、紧凑）
+const compactBtnSx = { textTransform: 'none', minWidth: 0, px: 1.25 };
+
 function DeviceLogPanel() {
     const logs = usePicoLogs();
     const [collapsed, setCollapsed] = useState(false);
@@ -338,33 +355,153 @@ function DeviceLogPanel() {
     );
 }
 
+/*--------------------------------------------------------------------+
+ * 左侧面板：活动栏 + 区段内容
+ *--------------------------------------------------------------------*/
+
+// 区段表：加新区段只需在这里加一项，并补一个渲染分支。
+// 顺序即活动栏自上而下的顺序 —— 设备在前（连接是第一步操作），脚本管理在后。
+const LEFT_SECTIONS = [
+    { id: 'device', label: '设备', Icon: UsbIcon },
+    { id: 'scripts', label: '脚本管理', Icon: FolderOpenIcon },
+];
+
+// 活动栏按钮（VS Code 风格）：图标竖排，选中项左侧一条强调色竖条
+function ActivityButton({ active, label, Icon, onClick }) {
+    return (
+        <Box
+            component="button"
+            type="button"
+            onClick={onClick}
+            aria-label={label}
+            aria-pressed={active}
+            title={label}
+            sx={{
+                position: 'relative', width: '100%', height: 44, border: 0, p: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', bgcolor: 'transparent',
+                color: active ? 'var(--panel-accent)' : 'var(--panel-muted)',
+                transition: 'color .15s, background-color .15s',
+                '&:hover': { color: active ? 'var(--panel-accent)' : 'var(--panel-ink)', bgcolor: 'var(--panel-hover-bg)' },
+                '&::before': active ? {
+                    content: '""', position: 'absolute', left: 0, top: 8, bottom: 8,
+                    width: 2, borderRadius: '0 2px 2px 0', bgcolor: 'var(--panel-accent)',
+                } : undefined,
+            }}
+        >
+            <Icon sx={{ fontSize: 20 }} />
+        </Box>
+    );
+}
+
+// ── 区段：脚本管理 ──────────────────────────────────────────────────────
+function ScriptsSection({ onApplyFromFile, onEdit, onApply, onExport }) {
+    return <LuaScriptManager onApplyFromFile={onApplyFromFile} onEdit={onEdit}
+        onApply={onApply} onExport={onExport} />;
+}
+
+// ── 区段：设备（连接 + 板载脚本操作 + 信息）──────────────────────────────
+function DeviceSection({ connected, transport, locked, baud, onBaud,
+    onConnect, onRefresh, onDisconnect, actions, onInfo }) {
+    return (
+        <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0 }}>
+            <PanelGroup dense title="连接"
+                hint={connected ? undefined : 'USB 走 WebUSB，UART 走 Web Serial'}>
+                {connected ? (
+                    <PanelRow label={transport === 'serial' ? 'UART 已连接' : 'USB 已连接'}>
+                        <Button size="small" variant="outlined" disableElevation disabled={locked}
+                            onClick={onRefresh} sx={compactBtnSx}>刷新</Button>
+                        <Button size="small" variant="outlined" disableElevation
+                            onClick={onDisconnect} sx={compactBtnSx}>断开</Button>
+                    </PanelRow>
+                ) : (
+                    <Stack spacing={1}>
+                        <Button variant="outlined" fullWidth disableElevation
+                            disabled={locked || !navigator.usb}
+                            onClick={() => onConnect('winusb')} sx={compactBtnSx}>连接 USB</Button>
+                        <Button variant="outlined" fullWidth disableElevation
+                            disabled={locked || !navigator.serial}
+                            onClick={() => onConnect('serial')} sx={compactBtnSx}>连接 UART</Button>
+                        <TextField size="small" fullWidth label="波特率" value={baud}
+                            inputProps={{ inputMode: 'numeric', 'aria-label': '波特率' }}
+                            onChange={e => onBaud(e.target.value)} />
+                    </Stack>
+                )}
+            </PanelGroup>
+
+            <PanelGroup dense title="板载脚本" hint="设备只存一份运行脚本">
+                {actions.map(a => <DeviceEntry key={a.title} {...a} />)}
+            </PanelGroup>
+
+            <PanelGroup dense title="关于">
+                <DeviceEntry icon={<InfoOutlinedIcon sx={{ fontSize: 18 }} />}
+                    title="设备与 API" hint="接口说明与设备信息" onClick={onInfo} />
+            </PanelGroup>
+        </Stack>
+    );
+}
+
+// ── 左侧面板外壳：活动栏 + 当前区段 ──────────────────────────────────────
+function LeftPanel({ width, section, onSection, scripts, device }) {
+    const current = LEFT_SECTIONS.find(s => s.id === section) || LEFT_SECTIONS[0];
+    return (
+        <Box component="aside" className="workspace-left" style={{ '--left-width': `${width}px` }}>
+            <Box className="workspace-activity">
+                {LEFT_SECTIONS.map(({ id, label, Icon }) => (
+                    <ActivityButton key={id} active={current.id === id} label={label} Icon={Icon}
+                        onClick={() => onSection(id)} />
+                ))}
+            </Box>
+            <Box className="workspace-left-main">
+                <Box className="workspace-left-header">
+                    <current.Icon sx={{ fontSize: 16, color: 'var(--panel-accent)' }} />
+                    <Typography sx={{ fontSize: 12, fontWeight: 600, color: 'var(--panel-ink)' }}>
+                        {current.label}
+                    </Typography>
+                </Box>
+                <Box className="workspace-left-body">
+                    {current.id === 'scripts'
+                        ? <ScriptsSection {...scripts} />
+                        : <DeviceSection {...device} />}
+                </Box>
+            </Box>
+        </Box>
+    );
+}
+
 export default function LuaWorkspace() {
     const [model] = useState(() => new WorkspaceModel(deviceSession, defaultSource));
     const editor = useStore(model);
     const device = useStore(deviceSession);
     const editorRef = useRef();
-    const [aiOpen, setAiOpen] = useState(false);
+    // AI 面板：展开状态与宽度都记忆在浏览器里（与左侧面板同构）
+    const { open: aiOpen, setOpen: setAiOpen, width: aiWidth, dragging: aiDragging,
+        startDrag: aiStartDrag, reset: aiResetWidth } = useAiPanel();
     const [aiRunning, setAiRunning] = useState(false);
     const [unread, setUnread] = useState(false);
-    const { width: aiWidth, dragging: aiDragging, startDrag: aiStartDrag, reset: aiResetWidth } = useAiPanelWidth(aiOpen);
     const left = useLeftPanel();
     const [dialog, setDialog] = useState('');
-    const [menu, setMenu] = useState(null);
     const [confirm, setConfirm] = useState(null);
     const [error, setError] = useState('');
+    const [toastClosed, setToastClosed] = useState(true);
     const [baud, setBaud] = useState('4000000');
     const theme = useThemeMode();
     const connected = device.state === 'connected';
-    const locked = !!device.busy || aiRunning || device.state === 'connecting';
+    const connecting = device.state === 'connecting';
+    const locked = !!device.busy || aiRunning || connecting;
     const byteLength = new TextEncoder().encode(editor.script).length;
     const tooLarge = byteLength > SCRIPT_MAX_BYTES;
     const matchesRam = device.ramSource !== null && editor.script === device.ramSource;
     const canSave = connected && !locked && matchesRam && !tooLarge && device.status?.kvReady;
+
+    // 操作反馈以浮动提示呈现（不占版面）；noticeSeq 变化即视为"又来了一条"，重置计时
+    useEffect(() => { setToastClosed(!editor.notice); }, [editor.noticeSeq, editor.notice]);
+
     const attempt = async fn => {
         setError('');
         try { await fn(); } catch (e) { setError(e.detail || e.message || String(e)); }
     };
-    const ask = (title, text, action) => { setMenu(null); setConfirm({ title, text, action }); };
+    const ask = (title, text, action) => setConfirm({ title, text, action });
     const connect = kind => {
         // Start the browser picker in the original click's user activation.
         setError('');
@@ -372,6 +509,7 @@ export default function LuaWorkspace() {
         attempt(async () => { await pending; await model.read({ automatic: true }); });
     };
     const importSource = source => model.edit(source, '已导入编辑器，尚未加载到设备。');
+
     // 窄屏（≤720px）三栏放不下：左侧面板与 AI 面板互斥，开一个就收另一个
     const isNarrow = () => typeof window !== 'undefined' && window.innerWidth <= 720;
     const toggleLeft = () => {
@@ -393,62 +531,116 @@ export default function LuaWorkspace() {
         return () => window.removeEventListener('beforeunload', handler);
     }, [model]);
 
+    const editorStatus = connected
+        ? (matchesRam
+            ? (device.status?.dirty ? '内存运行 · 尚未保存' : '与运行脚本一致')
+            : '编辑器改动 · 尚未加载')
+        : '本地草稿';
+
+    // 板载脚本操作（左侧「设备」区段）
+    const deviceActions = [
+        {
+            icon: <UploadIcon sx={{ fontSize: 18 }} />,
+            title: '读取设备', hint: '用设备当前运行脚本替换编辑器',
+            disabled: !connected || locked,
+            onClick: () => ask('读取设备', '用设备当前运行脚本替换编辑器内容？', () => model.read()),
+        },
+        {
+            icon: <StorageIcon sx={{ fontSize: 18 }} />,
+            title: '从 KV 加载运行', hint: '运行设备上已持久化的脚本',
+            disabled: !connected || locked,
+            onClick: () => ask('加载 KV', '从 KV 读取并运行脚本，同时替换编辑器内容？', () => model.switchRunning('kv')),
+        },
+        {
+            icon: <DescriptionIcon sx={{ fontSize: 18 }} />,
+            title: '运行预制脚本', hint: '切回出厂脚本，已存 KV 保留',
+            disabled: !connected || locked,
+            onClick: () => ask('运行预制脚本', '切换到预制脚本并替换编辑器内容？已保存的 KV 脚本保留。', () => model.switchRunning('default')),
+        },
+        {
+            icon: <FolderOpenIcon sx={{ fontSize: 18 }} />,
+            title: '预制模板 → 编辑器', hint: '只替换浏览器草稿，不碰设备',
+            disabled: locked,
+            onClick: () => ask('载入预制模板', '用预制脚本替换编辑器内容？此操作只修改浏览器草稿。', () => importSource(defaultSource)),
+        },
+        {
+            icon: <DeleteOutlineIcon sx={{ fontSize: 18 }} />,
+            title: '删除 KV 脚本', hint: '下次启动将运行预制脚本',
+            disabled: !connected || !device.status?.saved,
+            onClick: () => ask('删除 KV 脚本', '删除持久化脚本？当前脚本继续运行；下次启动运行预制脚本。',
+                async () => { await deviceSession.deleteSaved(); model.notify('已删除 KV 脚本，当前运行脚本保持原样。'); }),
+        },
+    ];
+
     return <Box className="workspace">
         <Box component="header" className="workspace-header">
-            <Stack direction="row" alignItems="center" spacing={1}>
+            <Stack direction="row" alignItems="center" spacing={1.25} sx={{ minWidth: 0 }}>
                 <IconButton size="small" className="workspace-left-toggle" aria-label="切换左侧面板"
                     title={left.open ? '收起左侧面板' : '展开左侧面板'} onClick={toggleLeft}
                     sx={{ color: left.open ? 'var(--panel-accent)' : 'var(--panel-muted)' }}>
                     <ViewSidebarIcon fontSize="small" />
                 </IconButton>
-                <CodeIcon color="primary" />
-                <Typography component="h1" sx={{ fontSize: 16, fontWeight: 700 }}>Pico DS5 <Box component="span" sx={{ color: 'var(--panel-muted)', fontWeight: 400 }}> / Lua 工作台</Box></Typography>
-                <StatusPill tone={connected ? 'accent' : 'muted'}>{connected ? device.transport === 'serial' ? 'UART 已连接' : 'USB 已连接' : device.state === 'connecting' ? '连接中' : '离线'}</StatusPill>
+                <Typography component="h1" noWrap sx={{ fontSize: 15, fontWeight: 700 }}>
+                    Pico DS5 <Box component="span" sx={{ color: 'var(--panel-muted)', fontWeight: 400 }}>/ Lua 工作台</Box>
+                </Typography>
+                <StatusPill tone={connected ? 'accent' : 'muted'}>
+                    {connected ? (device.transport === 'serial' ? 'UART 已连接' : 'USB 已连接') : (connecting ? '连接中' : '离线')}
+                </StatusPill>
             </Stack>
-            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ flexWrap: 'wrap', gap: 0.5 }}>
-                {connected ? <>
-                    <Button disabled={locked} onClick={() => attempt(() => deviceSession.refresh())}>刷新状态</Button>
-                    <Button onClick={() => attempt(() => deviceSession.disconnect())}>断开</Button>
-                </> : <>
-                    <Button variant="outlined" disabled={locked || !navigator.usb} onClick={() => connect('winusb')}>连接 USB</Button>
-                    <Button variant="outlined" disabled={locked || !navigator.serial} onClick={() => connect('serial')}>连接 UART</Button>
-                    <TextField size="small" label="波特率" inputProps={{ inputMode: 'numeric', 'aria-label': '波特率' }} value={baud} onChange={e => setBaud(e.target.value)} sx={{ width: 106 }} />
-                </>}
-                <IconButton title={`主题：${THEME_LABELS[theme.mode]}`} onClick={theme.cycle}><ContrastIcon fontSize="small" /></IconButton>
-            </Stack>
-        </Box>
-        <Box className="workspace-toolbar">
-            <Stack direction="row" spacing={0.5} alignItems="center">
-                <Button variant={left.open ? 'contained' : 'outlined'} onClick={toggleLeft}>脚本管理</Button>
-                <Button onClick={() => setDialog('export')}>导出</Button>
-                <Button disabled={!connected || locked} onClick={() => ask('读取设备', '用设备当前运行脚本替换编辑器内容？', () => model.read())}>读取设备</Button>
-                <IconButton title="更多操作" disabled={locked} onClick={e => setMenu(e.currentTarget)}><MoreHorizIcon fontSize="small" /></IconButton>
-            </Stack>
-            <Stack direction="row" spacing={0.75}>
-                <Button variant={aiOpen ? 'contained' : 'outlined'} onClick={toggleAi}>AI 助手{aiRunning ? ' · 工作中' : unread ? ' · 新回复' : ''}</Button>
-                <Button variant="outlined" startIcon={<PlayArrowIcon />} disabled={!connected || locked || tooLarge} onClick={() => attempt(() => model.run())}>加载到内存</Button>
-                <Button variant="contained" startIcon={<SaveIcon />} disabled={!canSave} onClick={() => ask('写入存储', '将当前运行脚本保存到 KV，作为下次启动的脚本？', () => model.save())}>写入存储</Button>
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ flexShrink: 0 }}>
+                <Button size="small" variant={aiOpen ? 'contained' : 'outlined'} disableElevation
+                    onClick={toggleAi} sx={{ textTransform: 'none' }}>
+                    AI 助手{aiRunning ? ' · 工作中' : unread ? ' · 新回复' : ''}
+                </Button>
+                <IconButton size="small" title={`主题：${THEME_LABELS[theme.mode]}`} onClick={theme.cycle}>
+                    <ContrastIcon fontSize="small" />
+                </IconButton>
             </Stack>
         </Box>
-        {(error || device.error || editor.draftError || editor.notice) && <Box role={error || device.error || editor.draftError ? 'alert' : 'status'} className="workspace-notice" sx={{ color: error || device.error || editor.draftError ? 'var(--panel-danger)' : 'var(--panel-muted)' }}>
-            {error || editor.draftError || device.error || editor.notice}
+
+        {device.busy && <LinearProgress sx={{ height: 2, flexShrink: 0 }} />}
+        {(error || device.error || editor.draftError) && <Box role="alert" className="workspace-notice" sx={{ color: 'var(--panel-danger)' }}>
+            {error || editor.draftError || device.error}
         </Box>}
         {!window.isSecureContext && <Box className="workspace-notice">设备连接需要 HTTPS 或 localhost；当前仍可离线编辑。</Box>}
-        {device.busy && <LinearProgress sx={{ height: 2, flexShrink: 0 }} />}
+
         <Box className={`workspace-body${aiOpen ? ' ai-visible' : ''}${left.open ? ' left-visible' : ''}`}>
             {left.open && <>
-                <LeftPanel width={left.width}
-                    onApplyFromFile={importSource}
-                    onEdit={item => importSource(item.script)}
-                    onApply={item => { importSource(item.script); attempt(() => model.run(item.script)); }} />
+                <LeftPanel width={left.width} section={left.section} onSection={left.setSection}
+                    scripts={{
+                        onApplyFromFile: importSource,
+                        onEdit: item => importSource(item.script),
+                        onApply: item => { importSource(item.script); attempt(() => model.run(item.script)); },
+                        onExport: () => setDialog('export'),
+                    }}
+                    device={{
+                        connected, transport: device.transport, locked, baud, onBaud: setBaud,
+                        onConnect: connect,
+                        onRefresh: () => attempt(() => deviceSession.refresh()),
+                        onDisconnect: () => attempt(() => deviceSession.disconnect()),
+                        actions: deviceActions,
+                        onInfo: () => setDialog('info'),
+                    }} />
                 <ColResizeHandle className="workspace-left-resizer" label="拖动调整左侧面板宽度（双击重置）"
                     onStart={left.startDrag} onReset={left.reset} dragging={left.dragging} />
             </>}
             <Box className="workspace-editor-pane">
-                <Box className="workspace-filebar">
-                    <span>main.lua</span>
-                    <span>{connected ? matchesRam ? device.status?.dirty ? '内存运行 · 尚未保存' : '与运行脚本一致' : '编辑器改动 · 尚未加载' : '本地草稿'}</span>
-                    <span style={{ marginLeft: 'auto', color: tooLarge ? 'var(--panel-danger)' : undefined }}>{(byteLength / 1024).toFixed(1)} / 60 KiB · {editor.script.split('\n').length} 行</span>
+                <Box className="workspace-editor-bar">
+                    <span className="workspace-editor-name">main.lua</span>
+                    <span className="workspace-editor-status">{editorStatus}</span>
+                    <span className="workspace-editor-meta"
+                        style={{ color: tooLarge ? 'var(--panel-danger)' : undefined }}>
+                        {(byteLength / 1024).toFixed(1)} / 60 KiB · {editor.script.split('\n').length} 行
+                    </span>
+                    <Stack direction="row" spacing={0.75} sx={{ ml: 'auto', flexShrink: 0 }}>
+                        <Button size="small" variant="outlined" disableElevation startIcon={<PlayArrowIcon />}
+                            disabled={!connected || locked || tooLarge}
+                            onClick={() => attempt(() => model.run())} sx={compactBtnSx}>加载到内存</Button>
+                        <Button size="small" variant="contained" disableElevation startIcon={<SaveIcon />}
+                            disabled={!canSave}
+                            onClick={() => ask('写入存储', '将当前运行脚本保存到 KV，作为下次启动的脚本？', () => model.save())}
+                            sx={compactBtnSx}>写入存储</Button>
+                    </Stack>
                 </Box>
                 <Box className="workspace-code" data-testid="lua-editor"><CodeEditor ref={editorRef} value={editor.script} onChange={model.edit} disabled={aiRunning} placeholder="-- 编写 Lua 脚本" /></Box>
                 <DeviceLogPanel />
@@ -460,17 +652,17 @@ export default function LuaWorkspace() {
                     onRunningChange={setAiRunning} onUnread={setUnread} onFoundLines={lines => editorRef.current?.scrollToLine(lines[0])} />
             </Box>
         </Box>
+
         <Box component="footer" className="workspace-footer">
             <span>{device.busy || (aiRunning ? 'AI 正在处理脚本' : '浏览器自动保留草稿 · 运行不写存储')}</span>
             <span>{device.status ? `KV ${device.status.saved ? '有已存脚本' : '无已存脚本'} · 分区 ${Math.round(device.status.partitionSize / 1024)} KiB` : '脚本上限 60 KiB · KV 分区 512 KiB'}</span>
         </Box>
-        <Menu anchorEl={menu} open={!!menu} onClose={() => setMenu(null)}>
-            <MenuItem onClick={() => ask('载入预制模板', '用预制脚本替换编辑器内容？此操作只修改浏览器草稿。', () => importSource(defaultSource))}>预制模板 → 编辑器</MenuItem>
-            <MenuItem disabled={!connected} onClick={() => ask('加载 KV', '从 KV 读取并运行脚本，同时替换编辑器内容？', () => model.switchRunning('kv'))}>从 KV 加载运行</MenuItem>
-            <MenuItem disabled={!connected} onClick={() => ask('运行预制脚本', '切换到预制脚本并替换编辑器内容？已保存的 KV 脚本保留。', () => model.switchRunning('default'))}>运行预制脚本</MenuItem>
-            <MenuItem disabled={!connected || !device.status?.saved} onClick={() => ask('删除 KV 脚本', '删除持久化脚本？当前脚本继续运行；下次启动运行预制脚本。', async () => { await deviceSession.deleteSaved(); model.notify('已删除 KV 脚本，当前运行脚本保持原样。'); })}>删除 KV 脚本</MenuItem>
-            <MenuItem onClick={() => { setMenu(null); setDialog('info'); }}>设备与 API</MenuItem>
-        </Menu>
+
+        <Snackbar open={!toastClosed && !!editor.notice} message={editor.notice}
+            autoHideDuration={4200} onClose={() => setToastClosed(true)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+            ContentProps={{ sx: { bgcolor: 'var(--panel-titlebar-bg)', color: 'var(--panel-titlebar-ink)', fontSize: 12.5 } }} />
+
         <LuaExportDialog open={dialog === 'export'} onClose={() => setDialog('')} script={editor.script} onNotify={model.notify} />
         <DialogShell open={!!confirm} onClose={() => setConfirm(null)} title={confirm?.title} maxWidth="xs"
             actions={<><Button onClick={() => setConfirm(null)}>取消</Button><Button variant="contained" onClick={() => { const action = confirm.action; setConfirm(null); attempt(action); }}>确认</Button></>}>

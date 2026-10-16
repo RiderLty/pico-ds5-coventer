@@ -6,13 +6,10 @@
  *   本模块     —— 什么时候发、发什么状态：整份 NKRO 状态（修饰键 + 112 位位图）
  *                 由 core1 维护并入队，core0 主循环取出发送。
  *
- * 两个使用场景：
- *   ① 映射关闭时的键盘直通：core.c 的 core_input_keyboard() 里，凡不是框架内部键
- *      （Lua 已消费 / 槽位热键 Alt+F1..F9 / 映射开关切换键）且 !map_on 的事件，
- *      都会经 kbd_out_key() 打到宿主键盘；
- *   ② Lua 的 dkb_key / dkb_release_all：绕过 map_on，直接打给宿主。
+ * 使用场景：Lua 的 kbd_key / kbd_release_all 输出函数 —— 本工程唯一的键盘输出入口。
+ * 接口未启用（dev_enable 的 kbd 参数为 0）时调用是 no-op。
  *
- * 为什么是"队列"而不是"最新状态覆盖"：kbd_tap 会在极短时间里产生 down→up 两次状态，
+ * 为什么是"队列"而不是"最新状态覆盖"：脚本可能在极短时间里产生 down→up 两次状态，
  * 若只留最新状态，core0 还没轮询就被 up 覆盖 → 这一次敲击就丢了。队列保证 down/up
  * 各自成为一条报文；队列满时丢**最旧**（状态是绝对值，最新一条即最终真相）。
  *
@@ -49,7 +46,7 @@ bool kbd_out_enabled(void);
 void kbd_out_key(uint8_t keycode, bool down);
 void kbd_out_release_all(void);           // 清空所有键与修饰（防粘键安全阀）
 
-// ── 查询（Lua 的 dkb_state / dkb_is_down）─────────────────────────────
+// ── 查询（Lua 的 kbd_state / kbd_is_down）─────────────────────────────
 // 取"宿主当前应该看到"的整份状态（最新那条；不是队列里还没发出去的那条）。
 // 未启用时恒为全 0。
 void kbd_out_state(kbd_out_state_t *out);
@@ -61,7 +58,7 @@ bool kbd_out_is_down(uint8_t keycode);
 // 字节 16 = 补齐（恒 0）。于是 keycode (0x04 + n) 对应第 (8 + n) 位。
 void kbd_out_state_bytes(uint8_t out[16]);
 
-// 同上的 4 个 u32（小端）视图，供 Lua 的 dkb_state() 直接 push
+// 同上的 4 个 u32（小端）视图，供 Lua 的 kbd_state() 直接 push
 void kbd_out_state_words(uint32_t out[4]);
 
 // ── core0（USB 主循环）────────────────────────────────────────────────

@@ -2,15 +2,15 @@
  * lua_binder 实现（由 pico-hid-mapper 的 src/lua_binder.c 按本工程 hidkit
  * 回调精简移植）。
  *
- * 与 mapper 版的差异：
- *   - 无 init()/tick()/on_custom_event/on_boot_button（本工程暂不需要；
- *     mapper 的 process/refresh 及对应 id 缓存一并裁掉）
- *   - 新增手柄绝对状态（on_gamepad_abs）与六轴（on_motion）转发
- *   - 计时不需要：无 tick，touchpad 节流是纯逐字节比较
- *   - **事件全量监听**：不再需要 enable_listen_* 声明 —— hidkit 事件
- *     一律直投 Lua 回调，C 侧无 bitmap/标志过滤（开销可接受：手柄
- *     报文 125~1000Hz，Lua pcall 调用本身 ~1µs 量级；未定义的回调
- *     只需一次整数比较即返回）
+ * 只做 C → Lua 回调。除板载 BOOTSEL 按键外，回调返回值都会被忽略；
+ * on_boot_button 返回真值时会拦截释放时的默认 WinUSB 开启行为。
+ *
+ * **事件全量监听**：hidkit 事件一律直投 Lua 回调，C 侧无开关、无位图过滤
+ * （开销可接受：手柄报文 125~1000Hz，Lua pcall 调用本身 ~1µs 量级；
+ * 未定义的回调只需一次整数比较即返回）。
+ *
+ * 转发口：键盘 / 鼠标按键 / 鼠标位移 / 滚轮 / 手柄按键 / 手柄绝对状态 / 六轴 /
+ * 触摸板快照 / 设备丢弃 / 板载 BOOTSEL 按键；另有 tick 周期回调。
  */
 
 #include "lua_binder.h"
@@ -34,6 +34,7 @@ static int g_lid_on_gamepad_abs = -1;
 static int g_lid_on_motion      = -1;
 static int g_lid_on_touchpad    = -1;
 static int g_lid_on_dropped     = -1;
+static int g_lid_on_boot_button = -1;
 static int g_lid_tick           = -1;
 
 // tick 的 dt 计时：距上次 lua_binder_process 的微秒差（首个 tick 记 0）
@@ -81,6 +82,7 @@ bool lua_binder_init(const char *script, size_t len) {
     g_lid_on_motion      = lua_core_find("on_motion");
     g_lid_on_touchpad    = lua_core_find("on_touchpad");
     g_lid_on_dropped     = lua_core_find("on_dropped");
+    g_lid_on_boot_button = lua_core_find("on_boot_button");
     g_lid_tick           = lua_core_find("tick");
 
     // 触摸板节流基线清零：新 VM 从零起
@@ -99,6 +101,7 @@ void lua_binder_deinit(void) {
     g_lid_on_key = g_lid_on_mouse_btn = g_lid_on_mouse_move = g_lid_on_mouse_wheel = -1;
     g_lid_on_gamepad_btn = g_lid_on_gamepad_abs = g_lid_on_motion = -1;
     g_lid_on_touchpad = g_lid_on_dropped = g_lid_tick = -1;
+    g_lid_on_boot_button = -1;
     lua_core_deinit();
 }
 
@@ -215,6 +218,19 @@ void lua_binder_on_dropped(int8_t slot, uint16_t vid, uint16_t pid) {
     lua_core_push_int(vid);
     lua_core_push_int(pid);
     (void)lua_core_pcall_id(g_lid_on_dropped, 3, 0);
+}
+
+// 板载 BOOTSEL 按键：on_boot_button(pressed)。返回 true 表示拦截默认行为；
+// false、nil、无返回值、未绑定或 Lua 调用出错均不拦截。
+bool lua_binder_on_boot_button(bool pressed) {
+    if (g_lid_on_boot_button < 0) return false;
+
+    lua_core_push_bool(pressed);
+    if (!lua_core_pcall_id(g_lid_on_boot_button, 1, 1)) return false;
+
+    bool handled = false;
+    (void)lua_core_pop_bool(&handled);
+    return handled;
 }
 
 //--------------------------------------------------------------------+

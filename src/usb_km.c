@@ -27,7 +27,7 @@
 
 // 全部状态 BSS 静态初始化（全关 = 全零）。usb_km_apply 在 usb_km_task 的
 // 状态切换（重枚举窗口）内惰性执行：boot 时未应用 → 配置描述符回调返回
-// flash 基线（与无 km 模块时逐字节一致）；ability_enable 请求 →
+// flash 基线（与无 km 模块时逐字节一致）；dev_enable 请求 →
 // tud_disconnect → apply → tud_connect。队列临界区在双核启动前由
 // usb_km_init 初始化。
 
@@ -48,11 +48,14 @@ void usb_km_init(void)
     DEBUG("[DS5C][KM] queues initialized\n");
 }
 
-void usb_km_request(bool kbd, bool mouse, bool io)
+void usb_km_request(int kbd, int mouse, int io)
 {
-    uint32_t mask = (kbd  ? USB_KM_BIT_KBD   : 0u)
-                  | (mouse ? USB_KM_BIT_MOUSE : 0u)
-                  | (io   ? USB_KM_BIT_IO    : 0u);
+    // 三态：-1 保持当前目标、0 关闭、1 开启。
+    // s_req_mask 只有 core1 写（Lua 调用线程）、core0 只读，读改写无竞态。
+    uint32_t mask = __atomic_load_n(&s_req_mask, __ATOMIC_RELAXED);
+    mask = usb_km_merge_tri(mask, kbd,   USB_KM_BIT_KBD);
+    mask = usb_km_merge_tri(mask, mouse, USB_KM_BIT_MOUSE);
+    mask = usb_km_merge_tri(mask, io,    USB_KM_BIT_IO);
     __atomic_store_n(&s_req_mask, mask, __ATOMIC_RELEASE);
 }
 

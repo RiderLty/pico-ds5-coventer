@@ -18,12 +18,13 @@
 #include "tusb.h"
 
 #include "debug.h"
+#include "boot_button.h"
 #include "input_queue.h"
 #include "input_app.h"
 #include "ds5_pad.h"
 #include "switch_pro.h"   // Switch Pro USB 握手：mount/report/umount/task 四口
 #include "usb_km.h"       // NKRO 键盘 / 16bit 鼠标输出接口（Lua 请求热重载）
-#include "usb_io.h"       // custom IO 通讯接口 echo（ability_enable 第三参动态开关）
+#include "usb_io.h"       // custom IO 通讯接口 echo（dev_enable 第三参动态开关）
 #include "uart_proto.h"   // UART 传输适配器（DMA RX + SLIP 协议帧）
 #include "lua_binder.h"
 #include "lua_script.h"
@@ -84,6 +85,7 @@ void core1_main(void) {
     tuh_task();
     input_app_task();   // Switch Pro 握手状态机（须与 tuh 回调同核同循环）
     lua_script_process();
+    boot_button_process();  // 板载 BOOTSEL 事件（core0 消抖后经跨核队列送来）
     lua_binder_process();   // Lua tick(dt_us)：主循环每轮调用（不节流，dt 兜时差）
   }
 }
@@ -109,6 +111,8 @@ int main(void) {
   // 初始化跨核队列与临界区。必须先于 core1 启动：
   // 生产者随时可能入队，自旋锁必须先就绪
   input_queue_init();
+  // BOOTSEL 事件队列（core0 → core1）同理，须在 core1 启动前就绪
+  boot_button_init();
   // 键鼠队列在启动 core1 前通过 SDK 初始化临界区，兼容 RP2350 软件锁。
   usb_km_init();
   lua_script_init();
@@ -139,7 +143,8 @@ int main(void) {
     tud_task();
     input_queue_flush();
     ds5_pad_tick();
-    usb_km_task();     // ability_enable 请求轮询，apply 在重枚举窗口内执行
+    boot_button_poll(); // BOOTSEL：10ms 限频读引脚 + 消抖，事件经跨核队列给 core1
+    usb_km_task();     // dev_enable 请求轮询，apply 在重枚举窗口内执行
     usb_km_service();  // 键鼠输出队列出队（未启用直接返回）
     usb_io_task();     // IO 通讯接口 echo（未启用直接返回）
     uart_proto_task(); // UART 传输：DMA RX 解析 + 通道 TX

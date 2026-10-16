@@ -47,7 +47,9 @@ console.log(await device.scriptError());
 各方法支持 `{ timeoutMs, signal }`，默认每条脚本请求超时 30 秒。同一 PicoDevice 的
 脚本操作串行，分块事务绑定当前连接，断线重连后旧事务不能继续。两种端口支持同一
 协议。自定义脚本若关闭或不启用 WinUSB IO，重启后须通过 UART 操作，或让脚本通过
-`ability_enable(kbd, mouse, true)` 启用 IO。运行中改变接口布局也可能断开 WebUSB。
+`dev_enable(-1, -1, 1)` 启用 IO（`-1` = 保持其余接口不变）。运行中改变接口布局也可能断开 WebUSB。
+
+板载 `on_boot_button(pressed)` 回调在默认行为前执行。返回 `true` 会拦截默认行为；返回 `false`、不返回值或未定义时，释放按键会调用 `dev_enable(-1, -1, 1)` 开启 WinUSB，并保持键盘和鼠标设置不变。
 
 ## 通信协议
 

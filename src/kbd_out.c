@@ -118,7 +118,7 @@ void kbd_out_release_all(void)
 }
 
 //--------------------------------------------------------------------+
-// 查询（Lua 的 dkb_state / dkb_is_down）
+// 查询（Lua 的 kbd_state / kbd_is_down）
 //--------------------------------------------------------------------+
 void kbd_out_state(kbd_out_state_t *out)
 {
