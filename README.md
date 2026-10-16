@@ -170,6 +170,15 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+如果标签推送未触发构建，或需要重新发布已有版本，可在 Actions → Build and Release →
+Run workflow 中选择 `main`，填写已有 tag；也可以使用 GitHub CLI：
+
+```bash
+gh workflow run release.yml --ref main -f tag=v1.0.0
+```
+
+手动发布会检出指定 tag 的源码，构建与发布均使用该版本。
+
 发布使用 GitHub Actions 自带的 `GITHUB_TOKEN`，无需额外配置发布密钥。
 
 ### 串口与 TinyUSB 调试

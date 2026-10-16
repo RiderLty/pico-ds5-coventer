@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to build and release (v*)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -18,10 +24,20 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" == v* ]] || { echo 'Release tag must start with v'; exit 1; }
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
         # 子模块统一交给 build.sh 准备，包含固定 TinyUSB 版本与 PIO-USB 补丁。
 
       - name: Install ARM toolchain
@@ -40,8 +56,6 @@ jobs:
         run: ./build.sh
 
       - name: Prepare release assets
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           mkdir -p build/release
           for ext in uf2 elf bin; do
@@ -54,8 +68,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
