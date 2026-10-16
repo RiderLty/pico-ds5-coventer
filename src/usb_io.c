@@ -122,7 +122,7 @@ static bool winusb_send_chunk(proto_chan_t *ch, const uint8_t *chunk, uint16_t l
     // raw = [seq][chunk] + CRC16 LE → SLIP 转义
     uint8_t raw[RAW_FRAME_MAX];
     uint16_t rlen = 0;
-    raw[rlen++] = s_seq++;
+    raw[rlen++] = s_seq;
     memcpy(raw + rlen, chunk, len);
     rlen = (uint16_t)(rlen + len);
     uint16_t crc = crc16_update(CRC16_INIT, raw, rlen);
@@ -148,7 +148,13 @@ static bool winusb_send_chunk(proto_chan_t *ch, const uint8_t *chunk, uint16_t l
 
     // FIFO 空间不足会部分写入撕裂帧：空间够才发
     if (tud_vendor_write_available() < flen) return false;
-    return tud_vendor_write(frame, flen) == flen;
+    if (tud_vendor_write(frame, flen) != flen) return false;
+    ++s_seq;
+    // TinyUSB only auto-flushes once the FIFO reaches the endpoint packet size.
+    // A short SCRIPT ACK (or final frame tail) must not wait for later logs to
+    // fill 64 bytes. If the endpoint is busy, its completion flushes the FIFO.
+    tud_vendor_write_flush();
+    return true;
 }
 
 static const proto_transport_t s_winusb_tr = {

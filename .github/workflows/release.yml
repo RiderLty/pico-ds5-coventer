@@ -61,19 +61,19 @@ jobs:
       - name: Test Bluetooth report and lifecycle handling
         if: startsWith(matrix.variant, 'bluetooth-')
         run: python3 tools/test_ds5_bt.py
+      - name: Test WinUSB short replies
+        run: python3 tools/test_usb_io.py
       - name: Prepare release assets
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
           mkdir -p release-assets
-          for ext in uf2 elf bin; do
-            cp "build/src/pico-ds5-coventer.${ext}" \
-              "release-assets/pico-ds5-coventer-${RELEASE_TAG}-${VARIANT}.${ext}"
-          done
+          cp build/src/pico-ds5-coventer.uf2 \
+            "release-assets/pico-ds5-coventer-${RELEASE_TAG}-${VARIANT}.uf2"
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.variant }}
-          path: release-assets/*
+          path: release-assets/*.uf2
           if-no-files-found: error
 
   release:
@@ -90,10 +90,6 @@ jobs:
           pattern: firmware-*
           merge-multiple: true
           path: release-assets
-      - name: Checksums
-        run: |
-          cd release-assets
-          sha256sum -- *.uf2 *.elf *.bin > SHA256SUMS
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -110,8 +106,8 @@ jobs:
 
             蓝牙版：手柄关机后按住 **PS + Create** 直到快速闪烁，等待对应无线板自动配对；成功后板载 LED 常亮。配对密钥独立存储，重启后按 PS 重连。上板兼容性仍需实际设备验证。
 
-            三版都通过原生 USB 输出 DS5，保留 Lua、BOOT 启用 WinUSB、网页编辑与 AI 配置功能。请按硬件选择 UF2；ELF/BIN 用于调试，SHA256SUMS 用于校验。
+            三版都通过原生 USB 输出 DS5，保留 Lua、BOOT 启用 WinUSB、网页编辑与 AI 配置功能。Release 仅发布三套 UF2，请按硬件选择。
 
             [网页工作台](https://riderlty.github.io/pico-ds5-coventer/) · [蓝牙说明](https://github.com/RiderLty/pico-ds5-coventer/blob/main/docs/bluetooth.md)
           fail_on_unmatched_files: true
-          files: release-assets/*
+          files: release-assets/*.uf2

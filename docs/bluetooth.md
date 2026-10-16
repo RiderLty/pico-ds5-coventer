@@ -59,7 +59,7 @@ Lua 的 `on_boot_button(pressed)` 返回 `true` 可拦截默认行为，自行�
 Waveshare 板级头来自 mapper / DS5Dongle，并统一 CMake 与 C 宏的 Flash 容量为实际 16 MiB。
 
 推送 `v*` tag 后，CI 三个矩阵任务分别构建，全部成功才发布同一版本的 Release，
-包含三套明确标注输入方式和板卡的 UF2 / ELF / BIN，以及统一 `SHA256SUMS`。
+仅发布三套明确标注输入方式和板卡的 UF2。
 任务产物也可在 Actions 页面下载。
 
 ## 实现与存储

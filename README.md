@@ -196,7 +196,7 @@ Host 引脚在 `src/main.c` 的 `pio_cfg.pin_dp` 设置。
 推送 `v*` tag 到 GitHub 后，`.github/workflows/release.yml` 调用同一个 `build.sh`
 分别编译 USB / Pico 2、蓝牙 / Pico 2 W、蓝牙 / Waveshare RP2350B-Plus-W 固件；三个任务都成功后创建对应 tag 的
 GitHub Release 并自动生成发布说明。附件包含带版本号与 `usb-pico2` / `bluetooth-pico2w`
-/ `bluetooth-waveshare-rp2350b-plus-w` 后缀的三套 `.uf2`、`.elf`、`.bin` 和统一 `SHA256SUMS`。
+/ `bluetooth-waveshare-rp2350b-plus-w` 后缀的三套 `.uf2`，不再发布其他格式的附件。
 
 ```bash
 git tag v1.0.0
