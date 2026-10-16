@@ -33,4 +33,4 @@ fi
 
 ./scripts/apply-patches.sh
 
-echo "环境就绪: cmake -B build -S . && make -C build -j8"
+echo "环境就绪: ./build.sh --skip-setup"

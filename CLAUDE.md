@@ -15,15 +15,18 @@ awalol/DS5Dongle（UAC1 音频接口 0-2 + DS5 接口 3）。
 
 ## 构建
 
-依赖通过 git submodule + vendored 源码管理，首次克隆后必须运行 setup：
+依赖通过 git submodule + vendored 源码管理，本地与 CI 共用构建入口：
 
 ```bash
-./scripts/setup-sdk.sh                  # submodule init + 把 SDK 内嵌 tinyusb 切到 2d56dc53
-cmake -S . -B build -DTUSB_DEBUG_LEVEL=0
-cmake --build build -j8
+./build.sh                             # 准备固定依赖 + Release 构建
+./build.sh --skip-setup                 # 已有依赖时离线增量构建
 # 产物：build/src/pico-ds5-coventer.uf2
 ```
 
+- `build.sh` 默认 Release，显式传入 Pico 2、日志级别 0、UART 4000000，防止旧缓存污染。
+  `BUILD_TYPE` / `JOBS` / `TUSB_DEBUG_LEVEL` / `DEBUG_BAUDRATE` 可覆盖，额外 CMake 参数置于 `--` 后。
+- `.github/workflows/release.yml` 仅在推送 `v*` tag 时构建发布，直接调用 `build.sh`，
+  发布 UF2 / ELF / BIN 与 SHA256SUMS；不在 CI 中另写一套依赖准备或构建逻辑。
 - 回归命令见 `docs/pico-device.md` 与 `docs/lua-scripts.md`；`src/CMakeLists.txt` 开 `-Wall -Wextra`。
 - 烧录：按住 BOOTSEL 插 USB，拷贝 uf2。
 - 调试构建：`cmake -S . -B build-debug -DTUSB_DEBUG_LEVEL=2`（级别 0..3；2 会打印

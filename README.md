@@ -142,15 +142,35 @@ hidkit 事件全量直投 Lua 回调：脚本里定义哪个回调就收哪个�
 | `lib/kvstore` | vendored，自 mapper 移植 | logkvs + Flash blockdevice，尾部 512 KiB |
 
 ```bash
-./scripts/setup-sdk.sh
-cmake -S . -B build -DTUSB_DEBUG_LEVEL=0
-cmake --build build -j8
+./build.sh
 # 产物：build/src/pico-ds5-coventer.uf2
+
+# 已准备好依赖时跳过 setup（支持离线增量编译）
+./build.sh --skip-setup
 ```
+
+`build.sh` 默认编译 Pico 2 **Release** 固件，自动初始化固定版本的子模块、切换
+TinyUSB 并应用 PIO-USB 补丁。通过 `BUILD_TYPE`、`JOBS`、`TUSB_DEBUG_LEVEL`、
+`DEBUG_BAUDRATE` 环境变量调整构建；默认日志级别 0、UART 4000000。
+使用 `--build-dir` 指定独立目录，额外 CMake 参数放在 `--` 后；`./build.sh --help`
+查看用法。脚本每次显式传入上述配置，避免复用上次调试构建的缓存值。
 
 SDK 路径已在顶层 CMake 指定，无需设置环境变量。setup 脚本会切换 SDK 内嵌的
 TinyUSB commit，因此 SDK 子模块显示 TinyUSB 指针差异是已有构建安排；无需修改依赖源码。
 Host 引脚在 `src/main.c` 的 `pio_cfg.pin_dp` 设置。
+
+### 自动发布
+
+推送 `v*` tag 到 GitHub 后，`.github/workflows/release.yml` 调用同一个 `build.sh`
+编译 Pico 2 Release 固件，创建对应 tag 的 GitHub Release 并自动生成发布说明。
+附件包含带版本号的 `.uf2`、`.elf`、`.bin` 和 `SHA256SUMS`。
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+发布使用 GitHub Actions 自带的 `GITHUB_TOKEN`，无需额外配置发布密钥。
 
 ### 串口与 TinyUSB 调试
 

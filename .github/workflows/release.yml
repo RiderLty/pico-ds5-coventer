@@ -1,0 +1,65 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # 子模块统一交给 build.sh 准备，包含固定 TinyUSB 版本与 PIO-USB 补丁。
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build python3 \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+
+      - name: Build firmware
+        env:
+          BUILD_TYPE: Release
+          TUSB_DEBUG_LEVEL: '0'
+          DEBUG_BAUDRATE: '4000000'
+          CMAKE_GENERATOR: Ninja
+        run: ./build.sh
+
+      - name: Prepare release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p build/release
+          for ext in uf2 elf bin; do
+            cp "build/src/pico-ds5-coventer.${ext}" \
+              "build/release/pico-ds5-coventer-${RELEASE_TAG}.${ext}"
+          done
+          cd build/release
+          sha256sum -- *.uf2 *.elf *.bin > SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            build/release/*.uf2
+            build/release/*.elf
+            build/release/*.bin
+            build/release/SHA256SUMS
